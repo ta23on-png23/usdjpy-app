@@ -6,13 +6,12 @@ from plotly import graph_objs as go
 import pandas as pd
 from scipy.stats import norm
 import datetime
-import pytz
 
 # --- ページ設定 ---
 st.set_page_config(page_title="USD/JPY AI確率予測", layout="wide")
 st.title('📈 USD/JPY AI確率予測モニター')
 
-# --- サイドバー：更新ボタン ---
+# --- サイドバー ---
 st.sidebar.header("操作盤")
 if st.sidebar.button('🔄 データを最新に更新'):
     st.rerun()
@@ -24,19 +23,23 @@ st.sidebar.markdown("""
 - **40%以下**: 売りのチャンス (赤)
 """)
 
-# --- 関数: 上昇確率の計算ロジック ---
+# --- 関数: 上昇確率の計算 ---
 def calculate_probability(current_price, predicted_price, lower_bound, upper_bound):
-    # Prophetの80%信頼区間から標準偏差(sigma)を逆算
-    # 信頼区間幅 = 2.56 * sigma (正規分布近似)
+    # 値を強制的に「数値(float)」に変換してエラーを防ぐ
+    try:
+        current_price = float(current_price)
+        predicted_price = float(predicted_price)
+        lower_bound = float(lower_bound)
+        upper_bound = float(upper_bound)
+    except:
+        return 50.0
+
     sigma = (upper_bound - lower_bound) / 2.56
     
     if sigma == 0:
         return 50.0
         
-    # Zスコア計算 (予測値が現在値からどれくらい離れているか)
     z_score = (predicted_price - current_price) / sigma
-    
-    # 累積分布関数で確率を算出(%)
     prob_up = norm.cdf(z_score) * 100
     return prob_up
 
@@ -44,31 +47,47 @@ def calculate_probability(current_price, predicted_price, lower_bound, upper_bou
 ticker = "USDJPY=X"
 
 try:
-    # 1. データ取得 (過去2年分、1時間足)
+    # 1. データ取得
     with st.spinner(f'{ticker} の最新データを取得中...'):
-        data = yf.download(ticker, period="2y", interval="1h")
+        raw_data = yf.download(ticker, period="2y", interval="1h")
     
-    if data.empty:
-        st.error("データの取得に失敗しました。時間をおいて再試行してください。")
+    if raw_data.empty:
+        st.error("データの取得に失敗しました。")
         st.stop()
 
-    # データの整形
-    df = data.reset_index()
-    # カラム名のゆらぎ吸収
-    if 'Date' in df.columns:
-        df = df.rename(columns={'Date': 'ds', 'Close': 'y'})
-    elif 'Datetime' in df.columns:
-        df = df.rename(columns={'Datetime': 'ds', 'Close': 'y'})
+    # --- 【重要】データ構造の強力なクリーニング ---
+    # MultiIndexカラム（2段組みの列名）になっている場合、1段目に平坦化する
+    if isinstance(raw_data.columns, pd.MultiIndex):
+        raw_data.columns = raw_data.columns.get_level_values(0)
+
+    # 'Close'列だけを取り出し、余計な列を削除
+    if 'Close' in raw_data.columns:
+        df = raw_data[['Close']].copy()
+    else:
+        # Closeが見つからない場合、2列目を強制的に採用（1列目はOpenの可能性があるため）
+        df = raw_data.iloc[:, [0]].copy() # 安全策として1列目を採用
+
+    # インデックス（日時）を列に戻す
+    df = df.reset_index()
+
+    # カラム名を強制的に ['ds', 'y'] に変更する（名前が何であれ）
+    # dfの列は [Date/Datetime, Close] の順になっているはず
+    df.columns = ['ds', 'y']
     
-    df = df[['ds', 'y']]
-    # タイムゾーン削除（Prophet用）
+    # タイムゾーン情報の削除
     df['ds'] = pd.to_datetime(df['ds']).dt.tz_localize(None)
 
-    # 最新価格の取得
-    latest_close = df['y'].iloc[-1]
+    # --- 【修正】値の取り出し方を変更（.item()を使用して確実に数値にする） ---
+    latest_close_series = df['y'].iloc[-1]
+    # Series型なら値を取り出す、そうでなければそのまま
+    if hasattr(latest_close_series, 'item'):
+        latest_close = latest_close_series.item()
+    else:
+        latest_close = float(latest_close_series)
+        
     latest_time = df['ds'].iloc[-1]
 
-    # --- 2. 画面トップ：現在レート表示 ---
+    # --- 2. 画面トップ表示 ---
     col1, col2 = st.columns([1, 3])
     with col1:
         st.metric(
@@ -80,53 +99,46 @@ try:
         st.info(f"最終データ日時: {latest_time.strftime('%Y/%m/%d %H:%M')}")
 
     # --- 3. AI学習と予測 ---
-    with st.spinner('AIが未来を計算中... (確率算出)'):
-        # モデル設定: ドル円の特性に合わせて調整
+    with st.spinner('AIが未来を計算中...'):
         m = Prophet(
-            changepoint_prior_scale=0.05, # トレンド変化への感度
-            daily_seasonality=True,       # 1日の時間帯による癖
-            weekly_seasonality=True,      # 曜日の癖
+            changepoint_prior_scale=0.05,
+            daily_seasonality=True,
+            weekly_seasonality=True,
             yearly_seasonality=False
         )
         m.fit(df)
 
-        # 未来24時間分の枠を作成
         future = m.make_future_dataframe(periods=24, freq='H')
         forecast = m.predict(future)
 
-    # --- 4. 確率判定テーブルの作成 ---
+    # --- 4. 確率判定テーブル ---
     st.subheader('🎯 未来の上昇・下落確率 (現在価格比)')
 
-    # 現在時刻より未来の予測データだけを取り出す
     future_forecast = forecast[forecast['ds'] > latest_time].copy()
-    
-    # チェックしたい時間（1, 4, 8, 24時間後）
     targets = [1, 4, 8, 24]
     results = []
 
     for h in targets:
-        # データが存在するか確認
         if len(future_forecast) >= h:
-            row = future_forecast.iloc[h-1] # indexは0始まりなので-1
+            row = future_forecast.iloc[h-1]
             
-            pred_val = row['yhat']
-            lower = row['yhat_lower']
-            upper = row['yhat_upper']
+            # 確実に数値化
+            pred_val = float(row['yhat'])
+            lower = float(row['yhat_lower'])
+            upper = float(row['yhat_upper'])
             target_time = row['ds']
 
             # 確率計算
             prob_up = calculate_probability(latest_close, pred_val, lower, upper)
             prob_down = 100 - prob_up
 
-            # 判定と色付け
+            # 判定
             trend = "➡️ レンジ"
-            
             if prob_up >= 60:
                 trend = "↗️ 上昇優勢"
             elif prob_down >= 60:
                 trend = "↘️ 下落優勢"
 
-            # 結果リストに追加
             results.append({
                 "対象": f"{h}時間後",
                 "予測日時": target_time.strftime('%m/%d %H:%M'),
@@ -137,25 +149,14 @@ try:
                 "判定": trend
             })
 
-    # 表を表示
     st.table(pd.DataFrame(results).set_index("対象"))
 
-    # --- 5. 予測チャートの表示 ---
+    # --- 5. グラフ表示 ---
     st.subheader('📊 予測推移チャート')
-    
     fig = plot_plotly(m, forecast)
-    
-    # 現在価格のライン（白の点線）を追加
-    fig.add_hline(
-        y=latest_close, 
-        line_dash="dash", 
-        line_color="white", 
-        annotation_text="現在価格", 
-        annotation_position="bottom right"
-    )
-
+    fig.add_hline(y=latest_close, line_dash="dash", line_color="white", annotation_text="現在価格")
     fig.update_layout(
-        title="青線: AI予測 / 水色帯: 予測のブレ幅 / 黒点: 実績",
+        title="青線: AI予測 / 水色帯: 予測範囲 / 黒点: 実績",
         yaxis_title="価格 (円)",
         xaxis_title="日時",
         template="plotly_dark",
