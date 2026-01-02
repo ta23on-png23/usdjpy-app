@@ -2,13 +2,15 @@ import streamlit as st
 import yfinance as yf
 from prophet import Prophet
 import pandas as pd
+import numpy as np # ダミーデータ作成用に追加
 from scipy.stats import norm
 import plotly.graph_objs as go
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 # ==========================================
 #  設定：パスワード
 # ==========================================
+# ★ここがパスワードの設定です。今は "demo" になっています。
 DEMO_PASSWORD = "demo" 
 
 # --- ページ設定 ---
@@ -82,6 +84,24 @@ def calculate_probability(current_price, predicted_price, lower_bound, upper_bou
     z_score = (p - c) / sigma
     return norm.cdf(z_score) * 100
 
+# --- ダミーデータ生成関数 (エラー回避用) ---
+def create_dummy_data():
+    # 過去7日分(168時間)のデータを適当に作成
+    dates = pd.date_range(end=datetime.now(), periods=168, freq='h')
+    base_price = 150.00
+    # ランダムウォークさせる
+    np.random.seed(42)
+    changes = np.random.randn(168) * 0.1
+    prices = base_price + np.cumsum(changes)
+    
+    df = pd.DataFrame(index=dates)
+    df['Close'] = prices
+    df['Open'] = prices + np.random.randn(168) * 0.05
+    df['High'] = prices + 0.1
+    df['Low'] = prices - 0.1
+    df.index.name = 'Date'
+    return df
+
 # --- メイン処理 ---
 st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (1時間足)**")
 st.markdown("""
@@ -91,14 +111,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 ticker = "USDJPY=X"
+is_dummy = False # ダミーデータかどうかのフラグ
 
 try:
-    with st.spinner('AIが直近1週間のデータを解析中...'):
-        df = yf.download(ticker, period="7d", interval="1h", progress=False)
+    with st.spinner('データ取得中...'):
+        # 1. まずリアルデータを試す
+        try:
+            df = yf.download(ticker, period="7d", interval="1h", progress=False)
+        except:
+            df = pd.DataFrame() # 失敗したら空にする
 
+    # 2. リアルデータが空っぽなら、ダミーデータを作る (安全装置)
     if df.empty:
-        st.error("データが取得できませんでした。")
-        st.stop()
+        is_dummy = True
+        df = create_dummy_data()
+        st.warning("⚠️ リアルタイムデータの取得に失敗しました。サーバー見本用の**サンプルデータ**を表示しています。")
 
     # --- データ整形 ---
     df = df.reset_index()
@@ -109,8 +136,14 @@ try:
     date_c = next((c for k, c in cols.items() if 'date' in k or 'time' in k), df.columns[0])
     close_c = next((c for k, c in cols.items() if 'close' in k), df.columns[1])
 
-    # タイムゾーン処理
-    df[date_c] = pd.to_datetime(df[date_c]).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
+    # タイムゾーン処理 (ダミーの場合はスキップ)
+    if not is_dummy:
+        try:
+            df[date_c] = pd.to_datetime(df[date_c]).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
+        except:
+            df[date_c] = pd.to_datetime(df[date_c])
+    else:
+        df[date_c] = pd.to_datetime(df[date_c])
 
     df_p = pd.DataFrame()
     df_p['ds'] = df[date_c]
@@ -177,8 +210,7 @@ try:
     }
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-
-    # --- 過去1週間のチャート (答え合わせ機能付き) ---
+    # --- 過去1週間のチャート ---
     st.markdown("#### **過去1週間の推移とAIの軌道**")
     
     fig_chart = go.Figure()
@@ -208,7 +240,7 @@ try:
         mode='lines', name='AI軌道', line=dict(color='yellow', width=2)
     ))
 
-    # X軸範囲固定（エラーの原因だった箇所を修正済み）
+    # X軸範囲固定
     x_min = df[date_c].min()
     x_max = forecast['ds'].max()
 
