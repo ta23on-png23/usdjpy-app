@@ -94,83 +94,62 @@ def get_forex_data_robust():
             pass
     return pd.DataFrame()
 
-# --- ★最重要：乖離（平均回帰）判定付き確率計算 ---
+# --- 乖離判定付き確率計算 ---
 def calculate_reversion_probability(current_price, predicted_price, lower_bound, upper_bound):
-    """
-    黄色い枠（AI予測範囲）からの乖離を見て、行き過ぎた相場の「戻り」を加味する
-    """
     c = to_float(current_price)
     p = to_float(predicted_price)
     l = to_float(lower_bound)
     u = to_float(upper_bound)
     
-    # 1. 基礎トレンド確率 (Zスコア)
+    # 1. 基礎トレンド確率
     sigma = (u - l) / 2.56
     if sigma == 0: base_prob = 50.0
     else:
         z_score = (p - c) / sigma
         base_prob = norm.cdf(z_score) * 100
 
-    # 2. 乖離補正 (Mean Reversion Logic)
-    # 黄色い枠の幅
+    # 2. 乖離補正
     box_width = u - l
     if box_width == 0: box_width = 0.01
 
     correction = 0.0
     note = "順張り(トレンド追随)"
     
-    # 【ケースA】上に突き抜けている場合 (Overbought)
-    if c > u:
-        # どれくらい突き抜けたか (乖離率)
+    if c > u: # 上振れ
         excess = c - u
-        ratio = excess / box_width # 枠の幅に対して何倍突き抜けたか
-        
-        # 突き抜けた分だけ、強力に「確率を下げる（下落調整を予測）」
-        correction = - (ratio * 40.0) # 係数40: かなり強く戻そうとする力
-        correction = max(correction, -40.0) # 最大でも40%ダウンまで
-        
+        ratio = excess / box_width
+        correction = - (ratio * 40.0)
+        correction = max(correction, -40.0)
         base_prob += correction
         note = f"⚠️上振れ乖離 (調整警戒 -{abs(correction):.1f}%)"
 
-    # 【ケースB】下に突き抜けている場合 (Oversold)
-    elif c < l:
-        # どれくらい突き抜けたか
+    elif c < l: # 下振れ
         excess = l - c
         ratio = excess / box_width
-        
-        # 突き抜けた分だけ、強力に「確率を上げる（自律反発を予測）」
         correction = + (ratio * 40.0)
         correction = min(correction, 40.0)
-        
         base_prob += correction
         note = f"⚠️下振れ乖離 (反発期待 +{abs(correction):.1f}%)"
 
-    # 【ケースC】枠内の場合 (Normal)
-    else:
-        # 枠内だが、上限・下限ギリギリの場合の微調整
-        # 中心からの距離を見る
+    else: # 枠内
         center = (u + l) / 2
-        dist_from_center = (c - center) / (box_width / 2) # -1.0 ~ 1.0
-        
-        # 端っこにいるほど少しだけ逆張り圧力をかける（ゴム紐の原理）
-        minor_correction = dist_from_center * -5.0 # 最大±5%程度の微調整
+        dist_from_center = (c - center) / (box_width / 2)
+        minor_correction = dist_from_center * -5.0
         base_prob += minor_correction
 
-    # 0~100に収める
     final_prob = max(1.0, min(99.0, base_prob))
-    
     return final_prob, note
 
 # --- メイン処理 ---
-st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (乖離修正ロジック搭載)**")
+st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (UI改良版)**")
 st.markdown("""
 <div style="margin-top: -10px; margin-bottom: 20px;">
-    <span style="font-size: 0.7rem; opacity: 0.8;">※黄色い枠（AI予測範囲）から価格が大きく外れた場合、「行き過ぎ」と判断して反発・調整の可能性を加味します。</span>
+    <span style="font-size: 0.7rem; opacity: 0.8;">※変動幅が0.15円未満の場合はグレーで表示されます。チャートは直近価格を中心に上下3円幅で固定表示しています。</span>
 </div>
 """, unsafe_allow_html=True)
 
 try:
-    with st.spinner('市場データ取得＆乖離計算中...'):
+    with st.spinner('市場データ取得＆計算中...'):
         df = get_forex_data_robust()
 
     if df.empty:
@@ -191,7 +170,7 @@ try:
     except:
         df[date_c] = pd.to_datetime(df[date_c])
 
-    # テクニカル計算 (表示用)
+    # テクニカル計算
     df['SMA20'] = df[close_c].rolling(window=20).mean()
     df['STD'] = df[close_c].rolling(window=20).std()
     df['BB_Upper'] = df['SMA20'] + (df['STD'] * 2)
@@ -214,7 +193,7 @@ try:
     future = m.make_future_dataframe(periods=13, freq='h')
     forecast = m.predict(future)
 
-    # --- 予測結果の抽出 ---
+    # --- 予測結果の抽出と色決定 ---
     st.markdown("#### **📈 短期予測 (上昇 vs 下落)**")
     
     targets = [1, 2, 4, 8, 12]
@@ -223,6 +202,8 @@ try:
     labels = []
     prices = []
     notes = []
+    colors_up = []   # 上昇バーの色リスト
+    colors_down = [] # 下落バーの色リスト
 
     for i, h in enumerate(targets):
         target_time = last_date + timedelta(hours=h)
@@ -230,25 +211,35 @@ try:
         
         pred = to_float(row['yhat'])
         
-        # ★乖離判定ロジックを使用
+        # 確率計算
         prob_up, note = calculate_reversion_probability(
-            current_price, 
-            pred, 
-            to_float(row['yhat_lower']), 
-            to_float(row['yhat_upper'])
+            current_price, pred, to_float(row['yhat_lower']), to_float(row['yhat_upper'])
         )
         prob_down = 100.0 - prob_up
+        
+        # ★色の決定ロジック (0.15円未満はグレー)
+        price_diff = abs(pred - current_price)
+        if price_diff < 0.15:
+            c_up = '#808080'   # グレー
+            c_down = '#808080' # グレー
+            note = f"誤差範囲 (変動幅 {price_diff:.2f}円)"
+        else:
+            c_up = '#00cc96'   # 緑
+            c_down = '#ff4b4b' # 赤
         
         probs_up.append(prob_up)
         probs_down.append(prob_down)
         labels.append(f"{h}H後")
         prices.append(pred)
         notes.append(note)
+        colors_up.append(c_up)
+        colors_down.append(c_down)
 
     # --- 棒グラフ ---
     fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(x=labels, y=probs_up, name='上昇確率', text=[f"{p:.1f}%" for p in probs_up], textposition='auto', marker_color='#00cc96'))
-    fig_bar.add_trace(go.Bar(x=labels, y=probs_down, name='下落確率', text=[f"{p:.1f}%" for p in probs_down], textposition='auto', marker_color='#ff4b4b'))
+    # マーカーカラーに色のリストを渡す
+    fig_bar.add_trace(go.Bar(x=labels, y=probs_up, name='上昇確率', text=[f"{p:.1f}%" for p in probs_up], textposition='auto', marker_color=colors_up))
+    fig_bar.add_trace(go.Bar(x=labels, y=probs_down, name='下落確率', text=[f"{p:.1f}%" for p in probs_down], textposition='auto', marker_color=colors_down))
     
     fig_bar.update_layout(
         template="plotly_dark",
@@ -262,18 +253,16 @@ try:
 
     # 詳細数値
     st.markdown("#### **詳細数値 & AI判断**")
-    
-    # 乖離状況によって文字色を変えるなどの処理（データフレーム上ではテキストで表現）
     detail_data = {
         "時間": labels,
         "予測レート": [f"{p:.2f} 円" for p in prices],
         "上昇確率": [f"{p:.1f} %" for p in probs_up],
         "下落確率": [f"{p:.1f} %" for p in probs_down],
-        "乖離判定": notes # ここに「上振れ乖離」などの理由が出る
+        "判定/状況": notes
     }
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- チャート表示 ---
+    # --- チャート表示 (デザイン改良版) ---
     st.markdown("#### **直近1週間の推移・AI軌道・テクニカル指標**")
     
     fig_chart = go.Figure()
@@ -282,26 +271,35 @@ try:
     fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
     fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['BB_Lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 200, 255, 0.1)', name='BB(±2σ)', hoverinfo='skip'))
 
-    # 実測
-    fig_chart.add_trace(go.Candlestick(x=df[date_c], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='実測'))
+    # ★ローソク足 (枠線のみ・塗りつぶしなし)
+    fig_chart.add_trace(go.Candlestick(
+        x=df[date_c],
+        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        name='実測',
+        increasing=dict(line=dict(color='#00cc96', width=1), fillcolor='rgba(0,0,0,0)'), # 緑枠・透明
+        decreasing=dict(line=dict(color='#ff4b4b', width=1), fillcolor='rgba(0,0,0,0)')  # 赤枠・透明
+    ))
 
     # SMA
     fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['SMA20'], mode='lines', name='20SMA', line=dict(color='cyan', width=1.5)))
     
-    # AI予測範囲 (黄色)
+    # AI予測範囲
     fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
     fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 255, 0, 0.15)', hoverinfo='skip', showlegend=False, name='AI予測範囲'))
 
     # AI予測線
     fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='AI軌道', line=dict(color='yellow', width=2)))
 
-    # 表示範囲
+    # 表示範囲計算 (X軸:直近7日, Y軸:上下1.5円固定)
     x_max = forecast['ds'].max()
     x_min = last_date - timedelta(days=7)
+    y_range_min = current_price - 1.5
+    y_range_max = current_price + 1.5
 
     fig_chart.update_layout(
         template="plotly_dark",
-        height=450,
+        height=600, # ★高さを大きく
+        plot_bgcolor='#000000', # ★背景を真っ黒に
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(
             range=[x_min, x_max],
@@ -310,6 +308,7 @@ try:
             rangeslider=dict(visible=False)
         ),
         yaxis=dict(
+            range=[y_range_min, y_range_max], # ★Y軸範囲を固定(3円幅)
             fixedrange=True
         ),
         showlegend=False
