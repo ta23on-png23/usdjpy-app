@@ -1,164 +1,221 @@
 import streamlit as st
 import yfinance as yf
+from Prophet import Prophet # 修正: ライブラリ名のケースに注意が必要な環境もあるため確認（通常は prophet）
 from prophet import Prophet
 import pandas as pd
 from scipy.stats import norm
 import plotly.graph_objs as go
+from datetime import timedelta
 
-# --- 安全な数値変換関数 ---
+# ==========================================
+#  設定：パスワード
+# ==========================================
+DEMO_PASSWORD = "demo" 
+
+# --- ページ設定 ---
+st.set_page_config(page_title="ドル円AI短期予測", layout="wide")
+
+# --- UI非表示 & 黒背景デザイン (CSS) ---
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    div[data-testid="stToolbar"] {visibility: hidden;}
+    .stDeployButton {display:none;}
+    
+    .stApp {
+        background-color: #000000;
+        color: #ffffff;
+    }
+    h1, h2, h3, h4, h5, h6, p, div, span, label, li {
+        color: #ffffff !important;
+        font-family: sans-serif;
+    }
+    .stTextInput > div > div > input {
+        color: #ffffff !important;
+        background-color: #333333;
+        font-weight: bold;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 5rem;
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- パスワード認証 ---
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+    if st.session_state.password_correct:
+        return True
+    
+    st.markdown("### 🔒 ドル円予測ツール (デモ版)")
+    password = st.text_input("パスワード", type="password")
+    if password == DEMO_PASSWORD:
+        st.session_state.password_correct = True
+        st.rerun()
+    elif password:
+        st.error("パスワードが違います")
+    return False
+
+if not check_password():
+    st.stop()
+
+# --- 数値変換 ---
 def to_float(x):
     try:
         if isinstance(x, float): return x
-        if isinstance(x, (pd.Series, pd.DataFrame)):
-            if x.empty: return 0.0
-            return float(x.to_numpy()[0])
+        if isinstance(x, (pd.Series, pd.DataFrame)): return float(x.iloc[0]) if not x.empty else 0.0
         if hasattr(x, 'item'): return float(x.item())
         if isinstance(x, list): return float(x[0])
         return float(x)
     except: return 0.0
 
-# --- ページ設定 ---
-st.set_page_config(page_title="USD/JPY AI確率予測", layout="wide")
-st.title('📈 USD/JPY AI確率予測モニター')
-
-# --- サイドバー ---
-st.sidebar.header("操作盤")
-if st.sidebar.button('🔄 データを最新に更新'):
-    st.rerun()
-st.sidebar.markdown("""
-**表示の見方**
-- **上昇確率**: 現在の価格より上がる確率
-- **60%以上**: 買いのチャンス (緑)
-- **40%以下**: 売りのチャンス (赤)
-""")
-
-# --- 確率計算関数 ---
+# --- 確率計算 ---
 def calculate_probability(current_price, predicted_price, lower_bound, upper_bound):
     c, p, l, u = to_float(current_price), to_float(predicted_price), to_float(lower_bound), to_float(upper_bound)
-    sigma = (u - l) / 2.56
+    sigma = (u - l) / 2.56 
     if sigma == 0: return 50.0
     z_score = (p - c) / sigma
     return norm.cdf(z_score) * 100
 
 # --- メイン処理 ---
+st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (1時間足)**")
+st.markdown("""
+<div style="margin-top: -10px; margin-bottom: 20px;">
+    <span style="font-size: 0.7rem; opacity: 0.8;">※黄色い帯の中にローソク足があれば「予測通り」、飛び出していれば「予測外」の動きです。</span>
+</div>
+""", unsafe_allow_html=True)
+
 ticker = "USDJPY=X"
 
 try:
-    # 1. データ取得
-    with st.spinner(f'{ticker} のデータを取得中...'):
-        raw_data = yf.download(ticker, period="2y", interval="1h", progress=False)
-    
-    if raw_data.empty:
-        st.error("データの取得に失敗しました。")
+    with st.spinner('AIが直近1週間のデータを解析中...'):
+        df = yf.download(ticker, period="7d", interval="1h", progress=False)
+
+    if df.empty:
+        st.error("データが取得できませんでした。")
         st.stop()
 
     # --- データ整形 ---
-    df = raw_data.reset_index()
+    df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    # カラム特定
-    date_col, open_col, high_col, low_col, close_col = None, None, None, None, None
-    for col in df.columns:
-        c_str = str(col).lower()
-        if 'date' in c_str or 'time' in c_str: date_col = col
-        if 'open' in c_str: open_col = col
-        if 'high' in c_str: high_col = col
-        if 'low' in c_str: low_col = col
-        if 'close' in c_str: close_col = col
+    cols = {c.lower(): c for c in df.columns}
+    date_c = next((c for k, c in cols.items() if 'date' in k or 'time' in k), df.columns[0])
+    close_c = next((c for k, c in cols.items() if 'close' in k), df.columns[1])
 
-    if date_col is None: date_col = df.columns[0]
-    if close_col is None: close_col = df.columns[1]
+    # タイムゾーン処理
+    df[date_c] = pd.to_datetime(df[date_c]).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
 
-    df_ohlc = pd.DataFrame()
-    df_ohlc['ds'] = pd.to_datetime(df[date_col]).dt.tz_localize(None)
-    df_ohlc['Open'] = df[open_col] if open_col else df[close_col]
-    df_ohlc['High'] = df[high_col] if high_col else df[close_col]
-    df_ohlc['Low'] = df[low_col] if low_col else df[close_col]
-    df_ohlc['Close'] = df[close_col]
-
-    df_clean = pd.DataFrame({'ds': df_ohlc['ds'], 'y': df_ohlc['Close']})
-    latest_close = to_float(df_clean['y'].iloc[-1])
-    latest_time = df_clean['ds'].iloc[-1]
-
-    # --- 2. 画面トップ表示 ---
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        st.metric(label="現在レート (直近終値)", value=f"{latest_close:.3f} 円", delta="最新更新")
-    with col2:
-        st.info(f"最終データ日時: {latest_time.strftime('%Y/%m/%d %H:%M')}")
-
-    # --- 3. AI学習と予測 ---
-    with st.spinner('AIが未来を計算中...'):
-        m = Prophet(changepoint_prior_scale=0.05, daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
-        m.fit(df_clean)
-        future = m.make_future_dataframe(periods=24, freq='H')
-        forecast = m.predict(future)
-
-    # --- 4. 確率判定テーブル ---
-    st.subheader('🎯 未来の上昇・下落確率')
-    future_forecast = forecast[forecast['ds'] > latest_time].copy()
-    targets = [1, 4, 8, 24]
-    results = []
-    for h in targets:
-        if len(future_forecast) >= h:
-            row = future_forecast.iloc[h-1]
-            pred_val = to_float(row['yhat'])
-            prob_up = calculate_probability(latest_close, pred_val, to_float(row['yhat_lower']), to_float(row['yhat_upper']))
-            trend = "➡️ レンジ"
-            if prob_up >= 60: trend = "↗️ 上昇優勢"
-            elif 100-prob_up >= 60: trend = "↘️ 下落優勢"
-            results.append({
-                "対象": f"{h}時間後", "予測日時": row['ds'].strftime('%m/%d %H:%M'),
-                "現在価格": f"{latest_close:.3f}", "予測価格": f"{pred_val:.3f}",
-                "上昇確率": f"{prob_up:.1f} %", "下落確率": f"{100-prob_up:.1f} %", "判定": trend
-            })
-    st.table(pd.DataFrame(results).set_index("対象"))
-
-    # --- 5. グラフ表示 (ローソク足) ---
-    st.subheader('📊 予測推移チャート (ローソク足＆AI予測)')
+    df_p = pd.DataFrame()
+    df_p['ds'] = df[date_c]
+    df_p['y'] = df[close_c]
     
-    fig = go.Figure()
+    current_price = to_float(df_p['y'].iloc[-1])
+    last_date = df_p['ds'].iloc[-1]
 
-    # ローソク足
-    fig.add_trace(go.Candlestick(
-        x=df_ohlc['ds'],
-        open=df_ohlc['Open'], high=df_ohlc['High'],
-        low=df_ohlc['Low'], close=df_ohlc['Close'],
-        name='実測値',
-        increasing_line_color='#00CC96',
-        decreasing_line_color='#EF553B'
+    st.write(f"**現在値: {current_price:,.2f} 円**")
+    st.write(f"<span style='font-size:0.8rem; color:#aaa'>基準日時: {last_date.strftime('%m/%d %H:%M')}</span>", unsafe_allow_html=True)
+
+    # --- Prophetによる予測 ---
+    m = Prophet(changepoint_prior_scale=0.1, daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
+    m.fit(df_p)
+    
+    future = m.make_future_dataframe(periods=13, freq='h')
+    forecast = m.predict(future)
+
+    # --- 予測結果の抽出 ---
+    st.markdown("#### **📈 短期予測 (上昇確率)**")
+    
+    targets = [1, 2, 4, 8, 12]
+    probs = []
+    labels = []
+    prices = []
+
+    for i, h in enumerate(targets):
+        target_time = last_date + timedelta(hours=h)
+        row = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
+        
+        pred = to_float(row['yhat'])
+        prob = calculate_probability(current_price, pred, to_float(row['yhat_lower']), to_float(row['yhat_upper']))
+        
+        probs.append(prob)
+        labels.append(f"{h}H後")
+        prices.append(pred)
+
+    # --- 棒グラフ ---
+    bar_colors = ['#ff4b4b' if p < 50 else '#00cc96' for p in probs]
+
+    fig_bar = go.Figure(data=[go.Bar(
+        x=labels,
+        y=probs,
+        text=[f"{p:.1f}%" for p in probs],
+        textposition='auto',
+        marker_color=bar_colors
+    )])
+    
+    fig_bar.update_layout(
+        template="plotly_dark",
+        height=200,
+        margin=dict(l=0, r=0, t=20, b=20),
+        yaxis=dict(range=[0, 100], title="上昇確率 (%)"),
+        showlegend=False
+    )
+    st.plotly_chart(fig_bar, use_container_width=True, config={'staticPlot': True})
+
+    # 詳細数値
+    st.markdown("#### **詳細数値**")
+    detail_data = {
+        "時間": labels,
+        "予測レート": [f"{p:.2f} 円" for p in prices],
+        "上昇確率": [f"{p:.1f} %" for p in probs]
+    }
+    st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
+
+
+    # --- 過去1週間のチャート (答え合わせ機能付き) ---
+    st.markdown("#### **過去1週間の推移とAIの軌道**")
+    
+    fig_chart = go.Figure()
+
+    # 1. 実測ローソク足
+    fig_chart.add_trace(go.Candlestick(
+        x=df[date_c],
+        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        name='実測'
     ))
-
-    # AI予測ライン(黄色)
-    fig.add_trace(go.Scatter(
-        x=forecast['ds'], y=forecast['yhat'],
-        mode='lines', name='AI予測ライン',
-        line=dict(color='yellow', width=2)
-    ))
-
-    # 予測範囲(薄い黄色)
-    fig.add_trace(go.Scatter(
+    
+    # 2. 黄色い帯（予測範囲）: 過去も含めて全期間表示
+    fig_chart.add_trace(go.Scatter(
         x=forecast['ds'], y=forecast['yhat_upper'],
         mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False
     ))
-    fig.add_trace(go.Scatter(
+    fig_chart.add_trace(go.Scatter(
         x=forecast['ds'], y=forecast['yhat_lower'],
         mode='lines', line=dict(width=0),
-        fill='tonexty', fillcolor='rgba(255, 255, 0, 0.2)',
+        fill='tonexty', fillcolor='rgba(255, 255, 0, 0.15)', # 薄い黄色
         hoverinfo='skip', showlegend=False, name='予測範囲'
     ))
 
-    fig.add_hline(y=latest_close, line_dash="dash", line_color="white", annotation_text="現在")
+    # 3. 黄色い線（AIの中心予測）
+    fig_chart.add_trace(go.Scatter(
+        x=forecast['ds'], y=forecast['yhat'],
+        mode='lines', name='AI軌道', line=dict(color='yellow', width=2)
+    ))
 
-    fig.update_layout(
-        title="実測ローソク足とAI予測ライン",
-        yaxis_title="価格 (円)",
+    # X軸範囲固定
+    x_min = df[date_c].min()
+    x_max = forecast['ds'].max()
+
+    fig_chart.update_layout(
         template="plotly_dark",
-        height=600,
-        xaxis_rangeslider_visible=True
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-except Exception as e:
-    st.error(f"エラーが発生しました: {e}")
+        height=400,
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis=dict(
+            range=[x_min, x_max
