@@ -2,15 +2,13 @@ import streamlit as st
 import yfinance as yf
 from prophet import Prophet
 import pandas as pd
-import numpy as np # ダミーデータ作成用に追加
 from scipy.stats import norm
 import plotly.graph_objs as go
-from datetime import timedelta, datetime
+from datetime import timedelta
 
 # ==========================================
 #  設定：パスワード
 # ==========================================
-# ★ここがパスワードの設定です。今は "demo" になっています。
 DEMO_PASSWORD = "demo" 
 
 # --- ページ設定 ---
@@ -84,48 +82,24 @@ def calculate_probability(current_price, predicted_price, lower_bound, upper_bou
     z_score = (p - c) / sigma
     return norm.cdf(z_score) * 100
 
-# --- ダミーデータ生成関数 (エラー回避用) ---
-def create_dummy_data():
-    # 過去7日分(168時間)のデータを適当に作成
-    dates = pd.date_range(end=datetime.now(), periods=168, freq='h')
-    base_price = 150.00
-    # ランダムウォークさせる
-    np.random.seed(42)
-    changes = np.random.randn(168) * 0.1
-    prices = base_price + np.cumsum(changes)
-    
-    df = pd.DataFrame(index=dates)
-    df['Close'] = prices
-    df['Open'] = prices + np.random.randn(168) * 0.05
-    df['High'] = prices + 0.1
-    df['Low'] = prices - 0.1
-    df.index.name = 'Date'
-    return df
-
 # --- メイン処理 ---
 st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (1時間足)**")
 st.markdown("""
 <div style="margin-top: -10px; margin-bottom: 20px;">
-    <span style="font-size: 0.7rem; opacity: 0.8;">※黄色い帯の中にローソク足があれば「予測通り」、飛び出していれば「予測外」の動きです。</span>
+    <span style="font-size: 0.7rem; opacity: 0.8;">※過去30日間（約720本）のデータを学習し、精度を高めて予測します。</span>
 </div>
 """, unsafe_allow_html=True)
 
 ticker = "USDJPY=X"
-is_dummy = False # ダミーデータかどうかのフラグ
 
 try:
-    with st.spinner('データ取得中...'):
-        # 1. まずリアルデータを試す
-        try:
-            df = yf.download(ticker, period="7d", interval="1h", progress=False)
-        except:
-            df = pd.DataFrame() # 失敗したら空にする
+    with st.spinner('AIが過去1ヶ月のデータを解析中...'):
+        # ★ここを変更：期間を7d→1mo(1ヶ月)に延長して精度向上
+        df = yf.download(ticker, period="1mo", interval="1h", progress=False)
 
-    # 2. リアルデータが空っぽなら、ダミーデータを作る (安全装置)
     if df.empty:
-        is_dummy = True
-        df = create_dummy_data()
-        st.warning("⚠️ リアルタイムデータの取得に失敗しました。サーバー見本用の**サンプルデータ**を表示しています。")
+        st.warning("現在、データが取得できません。（市場が休場、または通信エラーの可能性があります）")
+        st.stop()
 
     # --- データ整形 ---
     df = df.reset_index()
@@ -136,13 +110,10 @@ try:
     date_c = next((c for k, c in cols.items() if 'date' in k or 'time' in k), df.columns[0])
     close_c = next((c for k, c in cols.items() if 'close' in k), df.columns[1])
 
-    # タイムゾーン処理 (ダミーの場合はスキップ)
-    if not is_dummy:
-        try:
-            df[date_c] = pd.to_datetime(df[date_c]).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
-        except:
-            df[date_c] = pd.to_datetime(df[date_c])
-    else:
+    # タイムゾーン処理
+    try:
+        df[date_c] = pd.to_datetime(df[date_c]).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
+    except:
         df[date_c] = pd.to_datetime(df[date_c])
 
     df_p = pd.DataFrame()
@@ -156,7 +127,8 @@ try:
     st.write(f"<span style='font-size:0.8rem; color:#aaa'>基準日時: {last_date.strftime('%m/%d %H:%M')}</span>", unsafe_allow_html=True)
 
     # --- Prophetによる予測 ---
-    m = Prophet(changepoint_prior_scale=0.1, daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
+    # データが増えたので、変化への感度(changepoint_prior_scale)を少し調整
+    m = Prophet(changepoint_prior_scale=0.15, daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
     m.fit(df_p)
     
     future = m.make_future_dataframe(periods=13, freq='h')
@@ -172,6 +144,7 @@ try:
 
     for i, h in enumerate(targets):
         target_time = last_date + timedelta(hours=h)
+        # 最も近い時間の予測を取得
         row = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
         
         pred = to_float(row['yhat'])
@@ -210,8 +183,8 @@ try:
     }
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- 過去1週間のチャート ---
-    st.markdown("#### **過去1週間の推移とAIの軌道**")
+    # --- 過去のチャート (直近1週間だけズームして表示) ---
+    st.markdown("#### **直近1週間の推移とAIの軌道**")
     
     fig_chart = go.Figure()
 
@@ -240,16 +213,17 @@ try:
         mode='lines', name='AI軌道', line=dict(color='yellow', width=2)
     ))
 
-    # X軸範囲固定
-    x_min = df[date_c].min()
+    # ★ここがポイント：データは30日分あるが、チャートの表示は「直近7日間」にズームする
+    # こうしないとローソク足が小さくなりすぎて見えなくなるため
     x_max = forecast['ds'].max()
+    x_min = last_date - timedelta(days=7) # 表示開始位置を「7日前」にする
 
     fig_chart.update_layout(
         template="plotly_dark",
         height=400,
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(
-            range=[x_min, x_max],
+            range=[x_min, x_max], # 表示範囲のみ制限
             type="date",
             fixedrange=True, 
             rangeslider=dict(visible=False)
