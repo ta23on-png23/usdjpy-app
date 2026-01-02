@@ -101,21 +101,19 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     l = to_float(lower_bound)
     u = to_float(upper_bound)
     
-    # 1. 基礎トレンド確率
     sigma = (u - l) / 2.56
     if sigma == 0: base_prob = 50.0
     else:
         z_score = (p - c) / sigma
         base_prob = norm.cdf(z_score) * 100
 
-    # 2. 乖離補正
     box_width = u - l
     if box_width == 0: box_width = 0.01
 
     correction = 0.0
     note = "順張り(トレンド追随)"
     
-    if c > u: # 上振れ
+    if c > u: 
         excess = c - u
         ratio = excess / box_width
         correction = - (ratio * 40.0)
@@ -123,7 +121,7 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
         base_prob += correction
         note = f"⚠️上振れ乖離 (調整警戒 -{abs(correction):.1f}%)"
 
-    elif c < l: # 下振れ
+    elif c < l: 
         excess = l - c
         ratio = excess / box_width
         correction = + (ratio * 40.0)
@@ -131,7 +129,7 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
         base_prob += correction
         note = f"⚠️下振れ乖離 (反発期待 +{abs(correction):.1f}%)"
 
-    else: # 枠内
+    else: 
         center = (u + l) / 2
         dist_from_center = (c - center) / (box_width / 2)
         minor_correction = dist_from_center * -5.0
@@ -141,10 +139,10 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     return final_prob, note
 
 # --- メイン処理 ---
-st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (UI改良版)**")
+st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (高コントラスト版)**")
 st.markdown("""
 <div style="margin-top: -10px; margin-bottom: 20px;">
-    <span style="font-size: 0.7rem; opacity: 0.8;">※変動幅が0.15円未満の場合はグレーで表示されます。チャートは直近価格を中心に上下3円幅で固定表示しています。</span>
+    <span style="font-size: 0.7rem; opacity: 0.8;">※黄色い帯（AI予測）と紫色の帯（ボリンジャーバンド）の重なりでトレンドを判断します。</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -176,7 +174,6 @@ try:
     df['BB_Upper'] = df['SMA20'] + (df['STD'] * 2)
     df['BB_Lower'] = df['SMA20'] - (df['STD'] * 2)
 
-    # Prophetデータ作成
     df_p = pd.DataFrame()
     df_p['ds'] = df[date_c]
     df_p['y'] = df[close_c]
@@ -193,7 +190,7 @@ try:
     future = m.make_future_dataframe(periods=13, freq='h')
     forecast = m.predict(future)
 
-    # --- 予測結果の抽出と色決定 ---
+    # --- 予測結果抽出 ---
     st.markdown("#### **📈 短期予測 (上昇 vs 下落)**")
     
     targets = [1, 2, 4, 8, 12]
@@ -202,8 +199,8 @@ try:
     labels = []
     prices = []
     notes = []
-    colors_up = []   # 上昇バーの色リスト
-    colors_down = [] # 下落バーの色リスト
+    colors_up = []
+    colors_down = []
 
     for i, h in enumerate(targets):
         target_time = last_date + timedelta(hours=h)
@@ -211,21 +208,19 @@ try:
         
         pred = to_float(row['yhat'])
         
-        # 確率計算
         prob_up, note = calculate_reversion_probability(
             current_price, pred, to_float(row['yhat_lower']), to_float(row['yhat_upper'])
         )
         prob_down = 100.0 - prob_up
         
-        # ★色の決定ロジック (0.15円未満はグレー)
         price_diff = abs(pred - current_price)
         if price_diff < 0.15:
-            c_up = '#808080'   # グレー
-            c_down = '#808080' # グレー
+            c_up = '#808080'
+            c_down = '#808080'
             note = f"誤差範囲 (変動幅 {price_diff:.2f}円)"
         else:
-            c_up = '#00cc96'   # 緑
-            c_down = '#ff4b4b' # 赤
+            c_up = '#00cc96'
+            c_down = '#ff4b4b'
         
         probs_up.append(prob_up)
         probs_down.append(prob_down)
@@ -237,7 +232,6 @@ try:
 
     # --- 棒グラフ ---
     fig_bar = go.Figure()
-    # マーカーカラーに色のリストを渡す
     fig_bar.add_trace(go.Bar(x=labels, y=probs_up, name='上昇確率', text=[f"{p:.1f}%" for p in probs_up], textposition='auto', marker_color=colors_up))
     fig_bar.add_trace(go.Bar(x=labels, y=probs_down, name='下落確率', text=[f"{p:.1f}%" for p in probs_down], textposition='auto', marker_color=colors_down))
     
@@ -262,35 +256,45 @@ try:
     }
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- チャート表示 (デザイン改良版) ---
+    # --- チャート表示 (色改良版) ---
     st.markdown("#### **直近1週間の推移・AI軌道・テクニカル指標**")
     
     fig_chart = go.Figure()
 
-    # ボリンジャーバンド
+    # 1. ボリンジャーバンド (紫色・半透明) - 色を「バイオレット」に変更し、視認性を向上
     fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
-    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['BB_Lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 200, 255, 0.1)', name='BB(±2σ)', hoverinfo='skip'))
+    fig_chart.add_trace(go.Scatter(
+        x=df[date_c], y=df['BB_Lower'], mode='lines', line=dict(width=0),
+        fill='tonexty', 
+        fillcolor='rgba(138, 43, 226, 0.3)', # ★ここを変更: 紫色 (BlueViolet) で透明度0.3
+        name='BB(±2σ)', hoverinfo='skip'
+    ))
 
-    # ★ローソク足 (枠線のみ・塗りつぶしなし)
+    # 2. 実測ローソク足 (枠線のみ)
     fig_chart.add_trace(go.Candlestick(
         x=df[date_c],
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name='実測',
-        increasing=dict(line=dict(color='#00cc96', width=1), fillcolor='rgba(0,0,0,0)'), # 緑枠・透明
-        decreasing=dict(line=dict(color='#ff4b4b', width=1), fillcolor='rgba(0,0,0,0)')  # 赤枠・透明
+        increasing=dict(line=dict(color='#00cc96', width=1), fillcolor='rgba(0,0,0,0)'),
+        decreasing=dict(line=dict(color='#ff4b4b', width=1), fillcolor='rgba(0,0,0,0)')
     ))
 
-    # SMA
+    # 3. SMA (水色)
     fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['SMA20'], mode='lines', name='20SMA', line=dict(color='cyan', width=1.5)))
     
-    # AI予測範囲
+    # 4. AI予測範囲 (黄色・強め) - 透明度を上げてハッキリさせる
     fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
-    fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 255, 0, 0.15)', hoverinfo='skip', showlegend=False, name='AI予測範囲'))
+    fig_chart.add_trace(go.Scatter(
+        x=forecast['ds'], y=forecast['yhat_lower'], mode='lines', line=dict(width=0),
+        fill='tonexty', 
+        fillcolor='rgba(255, 255, 0, 0.4)', # ★ここを変更: 黄色で透明度0.4 (濃くした)
+        hoverinfo='skip', showlegend=False, name='AI予測範囲'
+    ))
 
-    # AI予測線
+    # 5. AI予測線 (黄色実線)
     fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='AI軌道', line=dict(color='yellow', width=2)))
 
-    # 表示範囲計算 (X軸:直近7日, Y軸:上下1.5円固定)
+    # 表示範囲計算
     x_max = forecast['ds'].max()
     x_min = last_date - timedelta(days=7)
     y_range_min = current_price - 1.5
@@ -298,8 +302,8 @@ try:
 
     fig_chart.update_layout(
         template="plotly_dark",
-        height=600, # ★高さを大きく
-        plot_bgcolor='#000000', # ★背景を真っ黒に
+        height=600,
+        plot_bgcolor='#000000',
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(
             range=[x_min, x_max],
@@ -308,7 +312,7 @@ try:
             rangeslider=dict(visible=False)
         ),
         yaxis=dict(
-            range=[y_range_min, y_range_max], # ★Y軸範囲を固定(3円幅)
+            range=[y_range_min, y_range_max],
             fixedrange=True
         ),
         showlegend=False
