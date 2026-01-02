@@ -94,7 +94,6 @@ ticker = "USDJPY=X"
 
 try:
     with st.spinner('AIが過去1ヶ月のデータを解析中...'):
-        # ★ここを変更：期間を7d→1mo(1ヶ月)に延長して精度向上
         df = yf.download(ticker, period="1mo", interval="1h", progress=False)
 
     if df.empty:
@@ -110,7 +109,6 @@ try:
     date_c = next((c for k, c in cols.items() if 'date' in k or 'time' in k), df.columns[0])
     close_c = next((c for k, c in cols.items() if 'close' in k), df.columns[1])
 
-    # タイムゾーン処理
     try:
         df[date_c] = pd.to_datetime(df[date_c]).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
     except:
@@ -127,7 +125,6 @@ try:
     st.write(f"<span style='font-size:0.8rem; color:#aaa'>基準日時: {last_date.strftime('%m/%d %H:%M')}</span>", unsafe_allow_html=True)
 
     # --- Prophetによる予測 ---
-    # データが増えたので、変化への感度(changepoint_prior_scale)を少し調整
     m = Prophet(changepoint_prior_scale=0.15, daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
     m.fit(df_p)
     
@@ -135,42 +132,57 @@ try:
     forecast = m.predict(future)
 
     # --- 予測結果の抽出 ---
-    st.markdown("#### **📈 短期予測 (上昇確率)**")
+    st.markdown("#### **📈 短期予測 (上昇 vs 下落)**")
     
     targets = [1, 2, 4, 8, 12]
-    probs = []
+    probs_up = []
+    probs_down = []
     labels = []
     prices = []
 
     for i, h in enumerate(targets):
         target_time = last_date + timedelta(hours=h)
-        # 最も近い時間の予測を取得
         row = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
         
         pred = to_float(row['yhat'])
-        prob = calculate_probability(current_price, pred, to_float(row['yhat_lower']), to_float(row['yhat_upper']))
+        prob_up = calculate_probability(current_price, pred, to_float(row['yhat_lower']), to_float(row['yhat_upper']))
+        prob_down = 100.0 - prob_up
         
-        probs.append(prob)
+        probs_up.append(prob_up)
+        probs_down.append(prob_down)
         labels.append(f"{h}H後")
         prices.append(pred)
 
-    # --- 棒グラフ ---
-    bar_colors = ['#ff4b4b' if p < 50 else '#00cc96' for p in probs]
-
-    fig_bar = go.Figure(data=[go.Bar(
+    # --- 棒グラフ (上昇と下落を並べて表示) ---
+    fig_bar = go.Figure()
+    
+    # 上昇確率（緑）
+    fig_bar.add_trace(go.Bar(
         x=labels,
-        y=probs,
-        text=[f"{p:.1f}%" for p in probs],
+        y=probs_up,
+        name='上昇確率',
+        text=[f"{p:.1f}%" for p in probs_up],
         textposition='auto',
-        marker_color=bar_colors
-    )])
+        marker_color='#00cc96'
+    ))
+
+    # 下落確率（赤）
+    fig_bar.add_trace(go.Bar(
+        x=labels,
+        y=probs_down,
+        name='下落確率',
+        text=[f"{p:.1f}%" for p in probs_down],
+        textposition='auto',
+        marker_color='#ff4b4b'
+    ))
     
     fig_bar.update_layout(
         template="plotly_dark",
-        height=200,
-        margin=dict(l=0, r=0, t=20, b=20),
-        yaxis=dict(range=[0, 100], title="上昇確率 (%)"),
-        showlegend=False
+        height=250,
+        margin=dict(l=0, r=0, t=30, b=20),
+        yaxis=dict(range=[0, 100], title="確率 (%)"),
+        barmode='group', # 横並びにする設定
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig_bar, use_container_width=True, config={'staticPlot': True})
 
@@ -179,11 +191,12 @@ try:
     detail_data = {
         "時間": labels,
         "予測レート": [f"{p:.2f} 円" for p in prices],
-        "上昇確率": [f"{p:.1f} %" for p in probs]
+        "上昇確率": [f"{p:.1f} %" for p in probs_up],
+        "下落確率": [f"{p:.1f} %" for p in probs_down] # 列を追加
     }
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- 過去のチャート (直近1週間だけズームして表示) ---
+    # --- 過去のチャート ---
     st.markdown("#### **直近1週間の推移とAIの軌道**")
     
     fig_chart = go.Figure()
@@ -195,7 +208,7 @@ try:
         name='実測'
     ))
     
-    # 2. 黄色い帯（予測範囲）
+    # 2. 黄色い帯
     fig_chart.add_trace(go.Scatter(
         x=forecast['ds'], y=forecast['yhat_upper'],
         mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False
@@ -207,23 +220,22 @@ try:
         hoverinfo='skip', showlegend=False, name='予測範囲'
     ))
 
-    # 3. 黄色い線（AIの中心予測）
+    # 3. 黄色い線
     fig_chart.add_trace(go.Scatter(
         x=forecast['ds'], y=forecast['yhat'],
         mode='lines', name='AI軌道', line=dict(color='yellow', width=2)
     ))
 
-    # ★ここがポイント：データは30日分あるが、チャートの表示は「直近7日間」にズームする
-    # こうしないとローソク足が小さくなりすぎて見えなくなるため
+    # 表示範囲
     x_max = forecast['ds'].max()
-    x_min = last_date - timedelta(days=7) # 表示開始位置を「7日前」にする
+    x_min = last_date - timedelta(days=7)
 
     fig_chart.update_layout(
         template="plotly_dark",
         height=400,
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(
-            range=[x_min, x_max], # 表示範囲のみ制限
+            range=[x_min, x_max],
             type="date",
             fixedrange=True, 
             rangeslider=dict(visible=False)
