@@ -4,7 +4,7 @@ from prophet import Prophet
 import pandas as pd
 from scipy.stats import norm
 import plotly.graph_objs as go
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 # ==========================================
 #  設定：パスワード
@@ -74,30 +74,107 @@ def to_float(x):
         return float(x)
     except: return 0.0
 
-# --- 確率計算 ---
-def calculate_probability(current_price, predicted_price, lower_bound, upper_bound):
-    c, p, l, u = to_float(current_price), to_float(predicted_price), to_float(lower_bound), to_float(upper_bound)
-    sigma = (u - l) / 2.56 
-    if sigma == 0: return 50.0
-    z_score = (p - c) / sigma
-    return norm.cdf(z_score) * 100
+# --- 強力データ取得関数 ---
+def get_forex_data_robust():
+    tickers_to_try = ["USDJPY=X", "JPY=X"]
+    for ticker in tickers_to_try:
+        try:
+            temp_df = yf.download(ticker, period="1mo", interval="1h", progress=False)
+            if not temp_df.empty and len(temp_df) > 24:
+                return temp_df
+        except:
+            pass
+        try:
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=29)
+            temp_df = yf.download(ticker, start=start_dt, end=end_dt, interval="1h", progress=False)
+            if not temp_df.empty and len(temp_df) > 24:
+                return temp_df
+        except:
+            pass
+    return pd.DataFrame()
+
+# --- ★最重要：乖離（平均回帰）判定付き確率計算 ---
+def calculate_reversion_probability(current_price, predicted_price, lower_bound, upper_bound):
+    """
+    黄色い枠（AI予測範囲）からの乖離を見て、行き過ぎた相場の「戻り」を加味する
+    """
+    c = to_float(current_price)
+    p = to_float(predicted_price)
+    l = to_float(lower_bound)
+    u = to_float(upper_bound)
+    
+    # 1. 基礎トレンド確率 (Zスコア)
+    sigma = (u - l) / 2.56
+    if sigma == 0: base_prob = 50.0
+    else:
+        z_score = (p - c) / sigma
+        base_prob = norm.cdf(z_score) * 100
+
+    # 2. 乖離補正 (Mean Reversion Logic)
+    # 黄色い枠の幅
+    box_width = u - l
+    if box_width == 0: box_width = 0.01
+
+    correction = 0.0
+    note = "順張り(トレンド追随)"
+    
+    # 【ケースA】上に突き抜けている場合 (Overbought)
+    if c > u:
+        # どれくらい突き抜けたか (乖離率)
+        excess = c - u
+        ratio = excess / box_width # 枠の幅に対して何倍突き抜けたか
+        
+        # 突き抜けた分だけ、強力に「確率を下げる（下落調整を予測）」
+        correction = - (ratio * 40.0) # 係数40: かなり強く戻そうとする力
+        correction = max(correction, -40.0) # 最大でも40%ダウンまで
+        
+        base_prob += correction
+        note = f"⚠️上振れ乖離 (調整警戒 -{abs(correction):.1f}%)"
+
+    # 【ケースB】下に突き抜けている場合 (Oversold)
+    elif c < l:
+        # どれくらい突き抜けたか
+        excess = l - c
+        ratio = excess / box_width
+        
+        # 突き抜けた分だけ、強力に「確率を上げる（自律反発を予測）」
+        correction = + (ratio * 40.0)
+        correction = min(correction, 40.0)
+        
+        base_prob += correction
+        note = f"⚠️下振れ乖離 (反発期待 +{abs(correction):.1f}%)"
+
+    # 【ケースC】枠内の場合 (Normal)
+    else:
+        # 枠内だが、上限・下限ギリギリの場合の微調整
+        # 中心からの距離を見る
+        center = (u + l) / 2
+        dist_from_center = (c - center) / (box_width / 2) # -1.0 ~ 1.0
+        
+        # 端っこにいるほど少しだけ逆張り圧力をかける（ゴム紐の原理）
+        minor_correction = dist_from_center * -5.0 # 最大±5%程度の微調整
+        base_prob += minor_correction
+
+    # 0~100に収める
+    final_prob = max(1.0, min(99.0, base_prob))
+    
+    return final_prob, note
 
 # --- メイン処理 ---
-st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (1時間足)**")
+st.markdown("### **🇺🇸🇯🇵 ドル円AI短期予測 (乖離修正ロジック搭載)**")
 st.markdown("""
 <div style="margin-top: -10px; margin-bottom: 20px;">
-    <span style="font-size: 0.7rem; opacity: 0.8;">※過去30日間（約720本）のデータを学習し、精度を高めて予測します。</span>
+    <span style="font-size: 0.7rem; opacity: 0.8;">※黄色い枠（AI予測範囲）から価格が大きく外れた場合、「行き過ぎ」と判断して反発・調整の可能性を加味します。</span>
 </div>
 """, unsafe_allow_html=True)
 
-ticker = "USDJPY=X"
-
 try:
-    with st.spinner('AIが過去1ヶ月のデータを解析中...'):
-        df = yf.download(ticker, period="1mo", interval="1h", progress=False)
+    with st.spinner('市場データ取得＆乖離計算中...'):
+        df = get_forex_data_robust()
 
     if df.empty:
-        st.warning("現在、データが取得できません。（市場が休場、または通信エラーの可能性があります）")
+        st.error("⚠️ データが取得できませんでした。しばらく時間を置いて再接続してください。")
         st.stop()
 
     # --- データ整形 ---
@@ -114,6 +191,13 @@ try:
     except:
         df[date_c] = pd.to_datetime(df[date_c])
 
+    # テクニカル計算 (表示用)
+    df['SMA20'] = df[close_c].rolling(window=20).mean()
+    df['STD'] = df[close_c].rolling(window=20).std()
+    df['BB_Upper'] = df['SMA20'] + (df['STD'] * 2)
+    df['BB_Lower'] = df['SMA20'] - (df['STD'] * 2)
+
+    # Prophetデータ作成
     df_p = pd.DataFrame()
     df_p['ds'] = df[date_c]
     df_p['y'] = df[close_c]
@@ -124,10 +208,9 @@ try:
     st.write(f"**現在値: {current_price:,.2f} 円**")
     st.write(f"<span style='font-size:0.8rem; color:#aaa'>基準日時: {last_date.strftime('%m/%d %H:%M')}</span>", unsafe_allow_html=True)
 
-    # --- Prophetによる予測 ---
+    # --- Prophet予測 ---
     m = Prophet(changepoint_prior_scale=0.15, daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
     m.fit(df_p)
-    
     future = m.make_future_dataframe(periods=13, freq='h')
     forecast = m.predict(future)
 
@@ -139,92 +222,78 @@ try:
     probs_down = []
     labels = []
     prices = []
+    notes = []
 
     for i, h in enumerate(targets):
         target_time = last_date + timedelta(hours=h)
         row = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
         
         pred = to_float(row['yhat'])
-        prob_up = calculate_probability(current_price, pred, to_float(row['yhat_lower']), to_float(row['yhat_upper']))
+        
+        # ★乖離判定ロジックを使用
+        prob_up, note = calculate_reversion_probability(
+            current_price, 
+            pred, 
+            to_float(row['yhat_lower']), 
+            to_float(row['yhat_upper'])
+        )
         prob_down = 100.0 - prob_up
         
         probs_up.append(prob_up)
         probs_down.append(prob_down)
         labels.append(f"{h}H後")
         prices.append(pred)
+        notes.append(note)
 
-    # --- 棒グラフ (上昇と下落を並べて表示) ---
+    # --- 棒グラフ ---
     fig_bar = go.Figure()
-    
-    # 上昇確率（緑）
-    fig_bar.add_trace(go.Bar(
-        x=labels,
-        y=probs_up,
-        name='上昇確率',
-        text=[f"{p:.1f}%" for p in probs_up],
-        textposition='auto',
-        marker_color='#00cc96'
-    ))
-
-    # 下落確率（赤）
-    fig_bar.add_trace(go.Bar(
-        x=labels,
-        y=probs_down,
-        name='下落確率',
-        text=[f"{p:.1f}%" for p in probs_down],
-        textposition='auto',
-        marker_color='#ff4b4b'
-    ))
+    fig_bar.add_trace(go.Bar(x=labels, y=probs_up, name='上昇確率', text=[f"{p:.1f}%" for p in probs_up], textposition='auto', marker_color='#00cc96'))
+    fig_bar.add_trace(go.Bar(x=labels, y=probs_down, name='下落確率', text=[f"{p:.1f}%" for p in probs_down], textposition='auto', marker_color='#ff4b4b'))
     
     fig_bar.update_layout(
         template="plotly_dark",
         height=250,
         margin=dict(l=0, r=0, t=30, b=20),
         yaxis=dict(range=[0, 100], title="確率 (%)"),
-        barmode='group', # 横並びにする設定
+        barmode='group',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig_bar, use_container_width=True, config={'staticPlot': True})
 
     # 詳細数値
-    st.markdown("#### **詳細数値**")
+    st.markdown("#### **詳細数値 & AI判断**")
+    
+    # 乖離状況によって文字色を変えるなどの処理（データフレーム上ではテキストで表現）
     detail_data = {
         "時間": labels,
         "予測レート": [f"{p:.2f} 円" for p in prices],
         "上昇確率": [f"{p:.1f} %" for p in probs_up],
-        "下落確率": [f"{p:.1f} %" for p in probs_down] # 列を追加
+        "下落確率": [f"{p:.1f} %" for p in probs_down],
+        "乖離判定": notes # ここに「上振れ乖離」などの理由が出る
     }
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- 過去のチャート ---
-    st.markdown("#### **直近1週間の推移とAIの軌道**")
+    # --- チャート表示 ---
+    st.markdown("#### **直近1週間の推移・AI軌道・テクニカル指標**")
     
     fig_chart = go.Figure()
 
-    # 1. 実測ローソク足
-    fig_chart.add_trace(go.Candlestick(
-        x=df[date_c],
-        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        name='実測'
-    ))
-    
-    # 2. 黄色い帯
-    fig_chart.add_trace(go.Scatter(
-        x=forecast['ds'], y=forecast['yhat_upper'],
-        mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False
-    ))
-    fig_chart.add_trace(go.Scatter(
-        x=forecast['ds'], y=forecast['yhat_lower'],
-        mode='lines', line=dict(width=0),
-        fill='tonexty', fillcolor='rgba(255, 255, 0, 0.15)',
-        hoverinfo='skip', showlegend=False, name='予測範囲'
-    ))
+    # ボリンジャーバンド
+    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
+    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['BB_Lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 200, 255, 0.1)', name='BB(±2σ)', hoverinfo='skip'))
 
-    # 3. 黄色い線
-    fig_chart.add_trace(go.Scatter(
-        x=forecast['ds'], y=forecast['yhat'],
-        mode='lines', name='AI軌道', line=dict(color='yellow', width=2)
-    ))
+    # 実測
+    fig_chart.add_trace(go.Candlestick(x=df[date_c], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='実測'))
+
+    # SMA
+    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['SMA20'], mode='lines', name='20SMA', line=dict(color='cyan', width=1.5)))
+    
+    # AI予測範囲 (黄色)
+    fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
+    fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 255, 0, 0.15)', hoverinfo='skip', showlegend=False, name='AI予測範囲'))
+
+    # AI予測線
+    fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='AI軌道', line=dict(color='yellow', width=2)))
 
     # 表示範囲
     x_max = forecast['ds'].max()
@@ -232,7 +301,7 @@ try:
 
     fig_chart.update_layout(
         template="plotly_dark",
-        height=400,
+        height=450,
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(
             range=[x_min, x_max],
