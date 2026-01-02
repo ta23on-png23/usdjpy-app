@@ -1,6 +1,5 @@
 import streamlit as st
 import yfinance as yf
-from Prophet import Prophet # 修正: ライブラリ名のケースに注意が必要な環境もあるため確認（通常は prophet）
 from prophet import Prophet
 import pandas as pd
 from scipy.stats import norm
@@ -191,7 +190,7 @@ try:
         name='実測'
     ))
     
-    # 2. 黄色い帯（予測範囲）: 過去も含めて全期間表示
+    # 2. 黄色い帯（予測範囲）
     fig_chart.add_trace(go.Scatter(
         x=forecast['ds'], y=forecast['yhat_upper'],
         mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False
@@ -199,7 +198,7 @@ try:
     fig_chart.add_trace(go.Scatter(
         x=forecast['ds'], y=forecast['yhat_lower'],
         mode='lines', line=dict(width=0),
-        fill='tonexty', fillcolor='rgba(255, 255, 0, 0.15)', # 薄い黄色
+        fill='tonexty', fillcolor='rgba(255, 255, 0, 0.15)',
         hoverinfo='skip', showlegend=False, name='予測範囲'
     ))
 
@@ -209,7 +208,7 @@ try:
         mode='lines', name='AI軌道', line=dict(color='yellow', width=2)
     ))
 
-    # X軸範囲固定
+    # X軸範囲固定（エラーの原因だった箇所を修正済み）
     x_min = df[date_c].min()
     x_max = forecast['ds'].max()
 
@@ -218,4 +217,18 @@ try:
         height=400,
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(
-            range=[x_min, x_max
+            range=[x_min, x_max],
+            type="date",
+            fixedrange=True, 
+            rangeslider=dict(visible=False)
+        ),
+        yaxis=dict(
+            fixedrange=True
+        ),
+        showlegend=False
+    )
+    
+    st.plotly_chart(fig_chart, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
+
+except Exception as e:
+    st.error(f"エラーが発生しました: {e}")
