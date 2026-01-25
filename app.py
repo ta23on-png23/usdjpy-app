@@ -101,24 +101,19 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     l = to_float(lower_bound)
     u = to_float(upper_bound)
     
-    # 【修正点1】予測幅が極端に狭い場合のノイズ対策（最低10銭幅と仮定）
     width = u - l
     min_width = 0.10
     adjusted_width = max(width, min_width)
     
-    # Sigmaの計算
     sigma = adjusted_width / 2.0 
 
-    # Zスコア計算
     if sigma == 0:
         base_prob = 50.0
     else:
         z_score = (p - c) / sigma
-        # 【修正点2】AIの過信を防ぐため感度を半分にする
         damped_z = z_score * 0.5
         base_prob = norm.cdf(damped_z) * 100
 
-    # 【修正点3】乖離補正をマイルド化（最大15%まで）
     correction = 0.0
     note = "順張り(トレンド追随)"
     
@@ -146,8 +141,6 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
         correction += minor_correction
 
     final_prob = base_prob + correction
-    
-    # 【修正点4】確率を10%~90%の範囲に制限
     final_prob = max(10.0, min(90.0, final_prob))
     
     return final_prob, note
@@ -311,8 +304,10 @@ try:
     # 表示範囲計算
     x_max = forecast['ds'].max()
     x_min = last_date - timedelta(days=7)
-    y_range_min = current_price - 1.5
-    y_range_max = current_price + 1.5
+    
+    # ★修正箇所: 上下幅を合計5円（±2.5円）に設定し、現在値を中央へ
+    y_range_min = current_price - 2.5
+    y_range_max = current_price + 2.5
 
     fig_chart.update_layout(
         template="plotly_dark",
