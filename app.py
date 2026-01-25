@@ -293,7 +293,6 @@ elif timeframe == "5分足 (5m)":
     time_unit = "minutes"
     trend_window = 100 
 else:
-    # 万が一のためのフォールバック（通常ここは通らない）
     api_interval = "15m"
     api_period = "1mo"
     min_width_setting = 0.05
@@ -354,11 +353,10 @@ try:
     
     m = Prophet(
         changepoint_prior_scale=prior_scale, 
-        daily_seasonality=False, # 短期足なので日次季節性はオフ
+        daily_seasonality=False,
         weekly_seasonality=True, 
         yearly_seasonality=False
     )
-    # 短期足用の周期追加
     m.add_seasonality(name='hourly', period=1/24, fourier_order=5)
 
     m.fit(df_p)
@@ -574,4 +572,31 @@ try:
         ))
         
         # 基準線
-        lines_to_draw =
+        lines_to_draw = [0, 100, -100, 200, -200, 300, -300]
+        for val in lines_to_draw:
+            color = 'white' if val == 0 else ('#333' if abs(val) < 300 else '#555')
+            width = 1 if val == 0 else 1
+            dash = 'solid' if val == 0 else 'dash'
+            fig_pnl.add_hline(y=val, line_dash=dash, line_color=color, line_width=width, annotation_text=f"{val} pips" if val !=0 else "±0")
+
+        vals_to_check = pd.concat([bt_results['P/L(pips)'], bt_results['Cumulative_PL']])
+        y_max = max(350, vals_to_check.max() + 50)
+        y_min = min(-350, vals_to_check.min() - 50)
+        
+        fig_pnl.update_layout(
+            template="plotly_dark",
+            height=400,
+            margin=dict(l=0, r=0, t=30, b=20),
+            yaxis=dict(title="pips", range=[y_min, y_max]),
+            xaxis=dict(title="決済日時", type='category'), 
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_pnl, use_container_width=True, config={'staticPlot': True})
+
+        st.dataframe(bt_results, hide_index=True, use_container_width=True)
+    else:
+        st.info(f"過去72時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
+
+except Exception as e:
+    st.error(f"エラーが発生しました: {e}")
