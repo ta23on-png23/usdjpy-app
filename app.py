@@ -41,6 +41,9 @@ st.markdown("""
         padding: 10px;
         border-radius: 10px;
     }
+    .stSlider > div > div > div > div {
+        color: #00cc96 !important;
+    }
     .block-container {
         padding-top: 2rem;
         padding-bottom: 5rem;
@@ -147,42 +150,34 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 (保有継続版) ---
-def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window):
+# --- バックテスト機能 (保有継続・可変閾値版) ---
+def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window, threshold):
     """
     過去48時間分のデータでテスト。
     ルール:
     1. エントリー後、±15pipsに到達するまでポジションを保有し続ける（時間制限なし）。
     2. ポジション保有中は新規エントリーしない（常に1ポジション）。
+    3. 指定された閾値(threshold)以上でエントリー。
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
-    # 期間設定
     cutoff_date = df_merged['ds'].max() - timedelta(hours=48)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
     results = []
-    active_trade = None # 現在保有中のポジション {type, entry_price, tp, sl, start_time}
+    active_trade = None 
     
-    # データループ
     for i in range(len(backtest_data)):
         row = backtest_data.iloc[i]
         current_time = row['ds']
         
-        # Open/High/Low/Close の取得
         o_price = to_float(row['Open'])
         h_price = to_float(row['High'])
         l_price = to_float(row['Low'])
         c_price = to_float(row['Close'])
         
-        # --- 1. 決済判定 (保有中の場合のみ) ---
+        # --- 1. 決済判定 ---
         if active_trade is not None:
-            # 高値・安値で指値/逆指値が刺さったか判定
-            # ※エントリーした足(i)の次の足(i+1)から判定するのが厳密だが、
-            #   ここでは簡易的に「エントリー直後の値動き」も含めるため、
-            #   エントリーした次のループ以降で判定を行う形にする。
-            #   (コード構造上、active_tradeが入った次のループからここを通る)
-            
             outcome = None
             pnl = 0.0
             
@@ -196,7 +191,6 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
                 if l_price <= active_trade['tp']: hit_tp = True
                 if h_price >= active_trade['sl']: hit_sl = True
             
-            # 判定ロジック (同足で両方刺さった場合は保守的に負けとする)
             if hit_sl and hit_tp:
                 outcome = "LOSS"
                 pnl = -15.0
@@ -208,7 +202,6 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
                 pnl = 15.0
             
             if outcome:
-                # 決済完了
                 results.append({
                     "エントリー": active_trade['start_time'].strftime('%m/%d %H:%M'),
                     "決済日時": current_time.strftime('%m/%d %H:%M'),
@@ -217,21 +210,18 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
                     "結果": outcome,
                     "P/L(pips)": pnl
                 })
-                active_trade = None # ポジション解消
-                continue # 決済した足では新規エントリーしない
+                active_trade = None 
+                continue 
         
-        # --- 2. 新規エントリー判定 (ノーポジの場合のみ) ---
+        # --- 2. 新規エントリー判定 ---
         if active_trade is None:
-            # AI予測データの取得
             pred = to_float(row['yhat'])
             
-            # トレンドSMAの取得
             current_trend_sma = to_float(row['Trend_SMA']) if 'Trend_SMA' in row else c_price
             trend_dir = 0
             if c_price > current_trend_sma: trend_dir = 1
             elif c_price < current_trend_sma: trend_dir = -1
             
-            # 確率計算 (Close価格基準)
             prob_up, _ = calculate_reversion_probability(
                 c_price, pred, 
                 to_float(row['yhat_lower']), to_float(row['yhat_upper']),
@@ -240,16 +230,16 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
             )
             
             action = None
-            if prob_up >= 80.0:
+            # ★閾値をスライダーの値(threshold)で判定
+            if prob_up >= threshold:
                 action = "BUY"
-            elif prob_up <= 20.0:
+            elif prob_up <= (100.0 - threshold):
                 action = "SELL"
                 
             if action:
-                # エントリー実行 (終値で入ったと仮定)
                 entry_price = c_price
-                tp_dist = 0.15 # 15pips
-                sl_dist = 0.15 # 15pips
+                tp_dist = 0.15 
+                sl_dist = 0.15 
                 
                 if action == "BUY":
                     active_trade = {
@@ -512,15 +502,26 @@ try:
     # --- バックテスト結果表示 ---
     st.markdown("---")
     st.markdown("### 🔙 **過去48時間のバックテスト (保有継続版)**")
-    st.markdown("""
+    
+    # ★スライダーの追加
+    entry_threshold = st.slider(
+        "エントリー判定閾値 (%)", 
+        min_value=70, 
+        max_value=95, 
+        value=80, # デフォルト80%
+        step=5,
+        help="AIの確信度がこの数値以上の場合のみエントリーします。数値を上げると勝率は上がりますが、取引回数は減ります。"
+    )
+
+    st.markdown(f"""
     <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
-    ルール: AIの方向確率が80%を超えた時点でエントリー。ポジションは常に1つ。<br>
-    <b>±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。</b><br>
-    ※結果が出るまで次のエントリーは行いません。
+    ルール: AIの方向確率が <b>{entry_threshold}%</b> を超えた時点でエントリー。ポジションは常に1つ。<br>
+    ±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。
     </div>
     """, unsafe_allow_html=True)
     
-    bt_results = perform_backtest_persistent(df, forecast, min_width_setting, trend_window)
+    # スライダーの値を関数に渡す
+    bt_results = perform_backtest_persistent(df, forecast, min_width_setting, trend_window, entry_threshold)
     
     if not bt_results.empty:
         total_trades = len(bt_results)
@@ -543,7 +544,7 @@ try:
         
         fig_pnl = go.Figure()
         
-        # 1. 単独損益 (棒グラフ)
+        # 1. 単独損益
         bar_colors = []
         for val in bt_results['P/L(pips)']:
             if val > 0: bar_colors.append('#00cc96') 
@@ -551,14 +552,14 @@ try:
             else: bar_colors.append('#808080')
 
         fig_pnl.add_trace(go.Bar(
-            x=bt_results['決済日時'], # X軸は決済日時に変更
+            x=bt_results['決済日時'], 
             y=bt_results['P/L(pips)'],
             name='単独損益',
             marker_color=bar_colors,
             opacity=0.6
         ))
         
-        # 2. 累積損益 (折れ線グラフ)
+        # 2. 累積損益
         fig_pnl.add_trace(go.Scatter(
             x=bt_results['決済日時'], 
             y=bt_results['Cumulative_PL'], 
@@ -575,7 +576,6 @@ try:
             dash = 'solid' if val == 0 else 'dash'
             fig_pnl.add_hline(y=val, line_dash=dash, line_color=color, line_width=width, annotation_text=f"{val} pips" if val !=0 else "±0")
 
-        # レイアウト調整
         vals_to_check = pd.concat([bt_results['P/L(pips)'], bt_results['Cumulative_PL']])
         y_max = max(350, vals_to_check.max() + 50)
         y_min = min(-350, vals_to_check.min() - 50)
@@ -593,7 +593,7 @@ try:
 
         st.dataframe(bt_results, hide_index=True, use_container_width=True)
     else:
-        st.info("過去48時間以内に条件(確率80%以上)を満たすエントリーポイントはありませんでした。")
+        st.info(f"過去48時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
 
 except Exception as e:
     st.error(f"エラーが発生しました: {e}")
