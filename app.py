@@ -150,10 +150,10 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 (時間フィルター付き・100時間版) ---
+# --- バックテスト機能 (時間フィルター付き・72時間版) ---
 def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window, threshold):
     """
-    過去100時間分のデータでテスト。
+    過去72時間分のデータでテスト。
     ルール:
     1. エントリー後、±15pipsに到達するまでポジションを保有し続ける。
     2. ポジション保有中は新規エントリーしない。
@@ -162,8 +162,8 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
-    # ★変更点: 過去48時間 -> 過去100時間
-    cutoff_date = df_merged['ds'].max() - timedelta(hours=100)
+    # ★変更点: 過去72時間
+    cutoff_date = df_merged['ds'].max() - timedelta(hours=72)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
     results = []
@@ -295,7 +295,7 @@ elif timeframe == "15分足 (15m)":
     
 else: # 5分足
     api_interval = "5m"
-    api_period = "5d" # 5日分取得すれば120時間なので100時間バックテスト可能
+    api_period = "5d" 
     min_width_setting = 0.03
     target_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後")]
     time_unit = "minutes"
@@ -507,7 +507,7 @@ try:
 
     # --- バックテスト結果表示 ---
     st.markdown("---")
-    st.markdown("### 🔙 **過去100時間のバックテスト (保有継続・時間フィルター版)**")
+    st.markdown("### 🔙 **過去72時間のバックテスト (保有継続・時間フィルター版)**")
     
     entry_threshold = st.slider(
         "エントリー判定閾値 (%)", 
@@ -594,11 +594,11 @@ try:
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(fig_pnl, use_container_width=True)
+        st.plotly_chart(fig_pnl, use_container_width=True, config={'staticPlot': True})
 
         st.dataframe(bt_results, hide_index=True, use_container_width=True)
     else:
-        st.info(f"過去100時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
+        st.info(f"過去72時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
 
 except Exception as e:
     st.error(f"エラーが発生しました: {e}")
