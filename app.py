@@ -147,99 +147,127 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 (15pips版) ---
-def perform_backtest_15pips(df, forecast_df, min_width_setting, trend_window):
+# --- バックテスト機能 (保有継続版) ---
+def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window):
     """
-    過去48時間分のデータで「確率80%以上で順張りエントリー、15pips利確損切り」をテストする
+    過去48時間分のデータでテスト。
+    ルール:
+    1. エントリー後、±15pipsに到達するまでポジションを保有し続ける（時間制限なし）。
+    2. ポジション保有中は新規エントリーしない（常に1ポジション）。
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
+    # 期間設定
     cutoff_date = df_merged['ds'].max() - timedelta(hours=48)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
     results = []
+    active_trade = None # 現在保有中のポジション {type, entry_price, tp, sl, start_time}
     
-    for i in range(len(backtest_data) - 1):
+    # データループ
+    for i in range(len(backtest_data)):
         row = backtest_data.iloc[i]
-        next_row = backtest_data.iloc[i+1] 
+        current_time = row['ds']
         
-        current_price = to_float(row['Close'])
-        pred = to_float(row['yhat'])
+        # Open/High/Low/Close の取得
+        o_price = to_float(row['Open'])
+        h_price = to_float(row['High'])
+        l_price = to_float(row['Low'])
+        c_price = to_float(row['Close'])
         
-        current_trend_sma = to_float(row['Trend_SMA']) if 'Trend_SMA' in row else current_price
-        
-        trend_dir = 0
-        if current_price > current_trend_sma: trend_dir = 1
-        elif current_price < current_trend_sma: trend_dir = -1
+        # --- 1. 決済判定 (保有中の場合のみ) ---
+        if active_trade is not None:
+            # 高値・安値で指値/逆指値が刺さったか判定
+            # ※エントリーした足(i)の次の足(i+1)から判定するのが厳密だが、
+            #   ここでは簡易的に「エントリー直後の値動き」も含めるため、
+            #   エントリーした次のループ以降で判定を行う形にする。
+            #   (コード構造上、active_tradeが入った次のループからここを通る)
             
-        prob_up, _ = calculate_reversion_probability(
-            current_price, pred, 
-            to_float(row['yhat_lower']), to_float(row['yhat_upper']),
-            min_width=min_width_setting,
-            trend_direction=trend_dir
-        )
-        
-        action = None
-        if prob_up >= 80.0:
-            action = "BUY"
-        elif prob_up <= 20.0: 
-            action = "SELL"
-            
-        if action:
-            entry_price = current_price
-            tp_pips = 0.15 
-            sl_pips = 0.15 
-            
-            outcome = "DRAW" 
+            outcome = None
             pnl = 0.0
             
-            next_high = to_float(next_row['High'])
-            next_low = to_float(next_row['Low'])
-            next_close = to_float(next_row['Close'])
+            hit_tp = False
+            hit_sl = False
             
-            if action == "BUY":
-                tp_price = entry_price + tp_pips
-                sl_price = entry_price - sl_pips
+            if active_trade['type'] == 'BUY':
+                if h_price >= active_trade['tp']: hit_tp = True
+                if l_price <= active_trade['sl']: hit_sl = True
+            elif active_trade['type'] == 'SELL':
+                if l_price <= active_trade['tp']: hit_tp = True
+                if h_price >= active_trade['sl']: hit_sl = True
+            
+            # 判定ロジック (同足で両方刺さった場合は保守的に負けとする)
+            if hit_sl and hit_tp:
+                outcome = "LOSS"
+                pnl = -15.0
+            elif hit_sl:
+                outcome = "LOSS"
+                pnl = -15.0
+            elif hit_tp:
+                outcome = "WIN"
+                pnl = 15.0
+            
+            if outcome:
+                # 決済完了
+                results.append({
+                    "エントリー": active_trade['start_time'].strftime('%m/%d %H:%M'),
+                    "決済日時": current_time.strftime('%m/%d %H:%M'),
+                    "売買": active_trade['type'],
+                    "価格": active_trade['entry_price'],
+                    "結果": outcome,
+                    "P/L(pips)": pnl
+                })
+                active_trade = None # ポジション解消
+                continue # 決済した足では新規エントリーしない
+        
+        # --- 2. 新規エントリー判定 (ノーポジの場合のみ) ---
+        if active_trade is None:
+            # AI予測データの取得
+            pred = to_float(row['yhat'])
+            
+            # トレンドSMAの取得
+            current_trend_sma = to_float(row['Trend_SMA']) if 'Trend_SMA' in row else c_price
+            trend_dir = 0
+            if c_price > current_trend_sma: trend_dir = 1
+            elif c_price < current_trend_sma: trend_dir = -1
+            
+            # 確率計算 (Close価格基準)
+            prob_up, _ = calculate_reversion_probability(
+                c_price, pred, 
+                to_float(row['yhat_lower']), to_float(row['yhat_upper']),
+                min_width=min_width_setting,
+                trend_direction=trend_dir
+            )
+            
+            action = None
+            if prob_up >= 80.0:
+                action = "BUY"
+            elif prob_up <= 20.0:
+                action = "SELL"
                 
-                hit_tp = next_high >= tp_price
-                hit_sl = next_low <= sl_price
+            if action:
+                # エントリー実行 (終値で入ったと仮定)
+                entry_price = c_price
+                tp_dist = 0.15 # 15pips
+                sl_dist = 0.15 # 15pips
                 
-                if hit_sl:
-                    outcome = "LOSS"
-                    pnl = -15.0 
-                elif hit_tp:
-                    outcome = "WIN"
-                    pnl = 15.0  
+                if action == "BUY":
+                    active_trade = {
+                        'type': 'BUY',
+                        'entry_price': entry_price,
+                        'tp': entry_price + tp_dist,
+                        'sl': entry_price - sl_dist,
+                        'start_time': current_time
+                    }
                 else:
-                    pnl = (next_close - entry_price) * 100
-                    outcome = "TIME_EXIT"
-
-            elif action == "SELL":
-                tp_price = entry_price - tp_pips
-                sl_price = entry_price + sl_pips
-                
-                hit_tp = next_low <= tp_price
-                hit_sl = next_high >= sl_price
-                
-                if hit_sl:
-                    outcome = "LOSS"
-                    pnl = -15.0 
-                elif hit_tp:
-                    outcome = "WIN"
-                    pnl = 15.0  
-                else:
-                    pnl = (entry_price - next_close) * 100
-                    outcome = "TIME_EXIT"
-            
-            results.append({
-                "時間": row['ds'].strftime('%m/%d %H:%M'),
-                "売買": action,
-                "Entry": entry_price,
-                "確率": f"{prob_up:.1f}%" if action=="BUY" else f"{100-prob_up:.1f}%",
-                "結果": outcome,
-                "P/L(pips)": round(pnl, 1)
-            })
-            
+                    active_trade = {
+                        'type': 'SELL',
+                        'entry_price': entry_price,
+                        'tp': entry_price - tp_dist,
+                        'sl': entry_price + sl_dist,
+                        'start_time': current_time
+                    }
+                    
     return pd.DataFrame(results)
 
 # --- メイン処理 ---
@@ -483,21 +511,21 @@ try:
 
     # --- バックテスト結果表示 ---
     st.markdown("---")
-    st.markdown("### 🔙 **過去48時間のバックテスト結果 (15pips 利確/損切り)**")
+    st.markdown("### 🔙 **過去48時間のバックテスト (保有継続版)**")
     st.markdown("""
     <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
-    ルール: AIの方向確率が80%を超えた時点でエントリー。次の足の高値/安値が15pips(0.15円)に達したら決済。<br>
-    ※同じ足で利確と損切りの両方に達した場合は「負け」としてカウントする厳しめの判定です。
+    ルール: AIの方向確率が80%を超えた時点でエントリー。ポジションは常に1つ。<br>
+    <b>±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。</b><br>
+    ※結果が出るまで次のエントリーは行いません。
     </div>
     """, unsafe_allow_html=True)
     
-    bt_results = perform_backtest_15pips(df, forecast, min_width_setting, trend_window)
+    bt_results = perform_backtest_persistent(df, forecast, min_width_setting, trend_window)
     
     if not bt_results.empty:
         total_trades = len(bt_results)
         wins = len(bt_results[bt_results['結果'] == "WIN"])
         losses = len(bt_results[bt_results['結果'] == "LOSS"])
-        time_exits = len(bt_results[bt_results['結果'] == "TIME_EXIT"])
         
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
         total_pips = bt_results['P/L(pips)'].sum()
@@ -506,9 +534,9 @@ try:
         col1.metric("総取引回数", f"{total_trades} 回")
         col2.metric("勝率", f"{win_rate:.1f} %")
         col3.metric("合計獲得pips", f"{total_pips:+.1f} pips", delta_color="normal")
-        col4.metric("内訳", f"勝{wins} / 負{losses} / 分{time_exits}")
+        col4.metric("内訳", f"勝{wins} / 負{losses}")
         
-        # --- 追加: 損益推移グラフ (改良版: 棒グラフ + 折れ線グラフ) ---
+        # --- 損益推移グラフ ---
         st.markdown("### 📊 **損益推移 (単独 & 累積)**")
         
         bt_results['Cumulative_PL'] = bt_results['P/L(pips)'].cumsum()
@@ -516,41 +544,38 @@ try:
         fig_pnl = go.Figure()
         
         # 1. 単独損益 (棒グラフ)
-        # 勝ちは緑、負けは赤、引き分け(0)はグレー
         bar_colors = []
         for val in bt_results['P/L(pips)']:
-            if val > 0: bar_colors.append('#00cc96') # 緑
-            elif val < 0: bar_colors.append('#ff4b4b') # 赤
-            else: bar_colors.append('#808080') # グレー
+            if val > 0: bar_colors.append('#00cc96') 
+            elif val < 0: bar_colors.append('#ff4b4b') 
+            else: bar_colors.append('#808080')
 
         fig_pnl.add_trace(go.Bar(
-            x=bt_results['時間'],
+            x=bt_results['決済日時'], # X軸は決済日時に変更
             y=bt_results['P/L(pips)'],
             name='単独損益',
             marker_color=bar_colors,
-            opacity=0.6 # 透けさせてラインを見やすく
+            opacity=0.6
         ))
         
         # 2. 累積損益 (折れ線グラフ)
         fig_pnl.add_trace(go.Scatter(
-            x=bt_results['時間'], 
+            x=bt_results['決済日時'], 
             y=bt_results['Cumulative_PL'], 
             mode='lines+markers', 
             name='累積損益',
-            line=dict(color='yellow', width=3) # 黄色で目立たせる
+            line=dict(color='yellow', width=3)
         ))
         
-        # 基準線 (0, ±100, ±200, ±300)
+        # 基準線
         lines_to_draw = [0, 100, -100, 200, -200, 300, -300]
         for val in lines_to_draw:
             color = 'white' if val == 0 else ('#333' if abs(val) < 300 else '#555')
             width = 1 if val == 0 else 1
             dash = 'solid' if val == 0 else 'dash'
-            
             fig_pnl.add_hline(y=val, line_dash=dash, line_color=color, line_width=width, annotation_text=f"{val} pips" if val !=0 else "±0")
 
-        # レイアウト調整 (見やすくするために±300以上の範囲も自動考慮)
-        # Y軸の範囲計算 (単独損益のバーと累積ラインの両方が入るように)
+        # レイアウト調整
         vals_to_check = pd.concat([bt_results['P/L(pips)'], bt_results['Cumulative_PL']])
         y_max = max(350, vals_to_check.max() + 50)
         y_min = min(-350, vals_to_check.min() - 50)
@@ -560,7 +585,7 @@ try:
             height=400,
             margin=dict(l=0, r=0, t=30, b=20),
             yaxis=dict(title="pips", range=[y_min, y_max]),
-            xaxis=dict(title="日時", type='category'), 
+            xaxis=dict(title="決済日時", type='category'), 
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
