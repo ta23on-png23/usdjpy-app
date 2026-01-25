@@ -91,7 +91,7 @@ def get_forex_data_robust(interval="1h", period="1mo"):
             pass
     return pd.DataFrame()
 
-# --- 乖離判定付き確率計算（トレンドフィルター強化版） ---
+# --- 乖離判定付き確率計算 ---
 def calculate_reversion_probability(current_price, predicted_price, lower_bound, upper_bound, min_width=0.10, trend_direction=0):
     c = to_float(current_price)
     p = to_float(predicted_price)
@@ -136,16 +136,111 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     if p < c and trend_direction == 1:
         penalty = 20.0 
         base_prob += penalty 
-        note = "長期上昇中のため下値限定的"
+        note = "長期上昇中のため下値限定"
     elif p > c and trend_direction == -1:
         penalty = 20.0
         base_prob -= penalty 
-        note = "長期下落中のため上値限定的"
+        note = "長期下落中のため上値限定"
 
     final_prob = base_prob + correction
     final_prob = max(15.0, min(85.0, final_prob)) 
     
     return final_prob, note
+
+# --- バックテスト機能 (15pips版) ---
+def perform_backtest_15pips(df, forecast_df, min_width_setting, trend_window):
+    """
+    過去48時間分のデータで「確率80%以上で順張りエントリー、15pips利確損切り」をテストする
+    """
+    df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
+    
+    cutoff_date = df_merged['ds'].max() - timedelta(hours=48)
+    backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
+    
+    results = []
+    
+    for i in range(len(backtest_data) - 1):
+        row = backtest_data.iloc[i]
+        next_row = backtest_data.iloc[i+1] 
+        
+        current_price = to_float(row['Close'])
+        pred = to_float(row['yhat'])
+        
+        current_trend_sma = to_float(row['Trend_SMA']) if 'Trend_SMA' in row else current_price
+        
+        trend_dir = 0
+        if current_price > current_trend_sma: trend_dir = 1
+        elif current_price < current_trend_sma: trend_dir = -1
+            
+        prob_up, _ = calculate_reversion_probability(
+            current_price, pred, 
+            to_float(row['yhat_lower']), to_float(row['yhat_upper']),
+            min_width=min_width_setting,
+            trend_direction=trend_dir
+        )
+        
+        action = None
+        if prob_up >= 80.0:
+            action = "BUY"
+        elif prob_up <= 20.0: 
+            action = "SELL"
+            
+        if action:
+            entry_price = current_price
+            tp_pips = 0.15  # ★修正: 15pips
+            sl_pips = 0.15  # ★修正: 15pips
+            
+            outcome = "DRAW" 
+            pnl = 0.0
+            
+            next_high = to_float(next_row['High'])
+            next_low = to_float(next_row['Low'])
+            next_close = to_float(next_row['Close'])
+            
+            if action == "BUY":
+                tp_price = entry_price + tp_pips
+                sl_price = entry_price - sl_pips
+                
+                hit_tp = next_high >= tp_price
+                hit_sl = next_low <= sl_price
+                
+                if hit_sl:
+                    outcome = "LOSS"
+                    pnl = -15.0 # ★修正
+                elif hit_tp:
+                    outcome = "WIN"
+                    pnl = 15.0  # ★修正
+                else:
+                    pnl = (next_close - entry_price) * 100
+                    outcome = "TIME_EXIT"
+
+            elif action == "SELL":
+                tp_price = entry_price - tp_pips
+                sl_price = entry_price + sl_pips
+                
+                hit_tp = next_low <= tp_price
+                hit_sl = next_high >= sl_price
+                
+                if hit_sl:
+                    outcome = "LOSS"
+                    pnl = -15.0 # ★修正
+                elif hit_tp:
+                    outcome = "WIN"
+                    pnl = 15.0  # ★修正
+                else:
+                    pnl = (entry_price - next_close) * 100
+                    outcome = "TIME_EXIT"
+            
+            results.append({
+                "時間": row['ds'].strftime('%m/%d %H:%M'),
+                "売買": action,
+                "Entry": entry_price,
+                "確率": f"{prob_up:.1f}%" if action=="BUY" else f"{100-prob_up:.1f}%",
+                "結果": outcome,
+                "P/L(pips)": round(pnl, 1)
+            })
+            
+    return pd.DataFrame(results)
 
 # --- メイン処理 ---
 st.markdown("### **ドル円AI短期予測 (マルチタイムフレーム・トレンド補正版)**")
@@ -220,7 +315,6 @@ try:
     current_trend_sma = to_float(df['Trend_SMA'].iloc[-1])
     last_date = df_p['ds'].iloc[-1]
     
-    # トレンド方向判定
     trend_dir = 0
     if not pd.isna(current_trend_sma):
         if current_price > current_trend_sma: trend_dir = 1 
@@ -386,6 +480,37 @@ try:
     )
     
     st.plotly_chart(fig_chart, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
+
+    # --- バックテスト結果表示 ---
+    st.markdown("---")
+    st.markdown("### 🔙 **過去48時間のバックテスト結果 (15pips 利確/損切り)**")
+    st.markdown("""
+    <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
+    ルール: AIの方向確率が80%を超えた時点でエントリー。次の足の高値/安値が15pips(0.15円)に達したら決済。<br>
+    ※同じ足で利確と損切りの両方に達した場合は「負け」としてカウントする厳しめの判定です。
+    </div>
+    """, unsafe_allow_html=True)
+    
+    bt_results = perform_backtest_15pips(df, forecast, min_width_setting, trend_window)
+    
+    if not bt_results.empty:
+        total_trades = len(bt_results)
+        wins = len(bt_results[bt_results['結果'] == "WIN"])
+        losses = len(bt_results[bt_results['結果'] == "LOSS"])
+        time_exits = len(bt_results[bt_results['結果'] == "TIME_EXIT"])
+        
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        total_pips = bt_results['P/L(pips)'].sum()
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("総取引回数", f"{total_trades} 回")
+        col2.metric("勝率", f"{win_rate:.1f} %")
+        col3.metric("合計獲得pips", f"{total_pips:+.1f} pips", delta_color="normal")
+        col4.metric("内訳", f"勝{wins} / 負{losses} / 分{time_exits}")
+        
+        st.dataframe(bt_results, hide_index=True, use_container_width=True)
+    else:
+        st.info("過去48時間以内に条件(確率80%以上)を満たすエントリーポイントはありませんでした。")
 
 except Exception as e:
     st.error(f"エラーが発生しました: {e}")
