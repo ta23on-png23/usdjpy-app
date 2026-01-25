@@ -5,6 +5,7 @@ import pandas as pd
 from scipy.stats import norm
 import plotly.graph_objs as go
 from datetime import timedelta, datetime
+import pytz
 
 # ==========================================
 #  設定：パスワード
@@ -82,13 +83,32 @@ def to_float(x):
         return float(x)
     except: return 0.0
 
-# --- 強力データ取得関数 ---
+# --- ★追加機能: リアルタイム価格強制取得 ---
+def get_realtime_price():
+    try:
+        # 1分足の最新データを取得して、現在値を強制更新する
+        ticker = yf.Ticker("USDJPY=X")
+        # 直近1日分の1分足を取得
+        df_now = ticker.history(period="1d", interval="1m")
+        if not df_now.empty:
+            latest_price = float(df_now['Close'].iloc[-1])
+            # タイムゾーン処理
+            last_time = df_now.index[-1]
+            if last_time.tzinfo is None:
+                last_time = last_time.replace(tzinfo=pytz.utc)
+            last_time_jst = last_time.astimezone(pytz.timezone('Asia/Tokyo'))
+            return latest_price, last_time_jst
+    except:
+        pass
+    return None, None
+
+# --- 強力データ取得関数 (分析用) ---
 def get_forex_data_robust(interval="1h", period="1mo"):
     tickers_to_try = ["USDJPY=X", "JPY=X"]
     for ticker in tickers_to_try:
         try:
             temp_df = yf.download(ticker, period=period, interval=interval, progress=False)
-            if not temp_df.empty and len(temp_df) > 20:
+            if not temp_df.empty and len(temp_df) > 10:
                 return temp_df
         except:
             pass
@@ -150,19 +170,13 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 (時間フィルター付き・72時間版) ---
+# --- バックテスト機能 ---
 def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window, threshold):
     """
     過去72時間分のデータでテスト。
-    ルール:
-    1. エントリー後、±15pipsに到達するまでポジションを保有し続ける。
-    2. ポジション保有中は新規エントリーしない。
-    3. 指定された閾値(threshold)以上でエントリー。
-    4. 日本時間 02:00 ～ 08:59 の間はエントリーしない。
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
-    # 過去72時間
     cutoff_date = df_merged['ds'].max() - timedelta(hours=72)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
@@ -269,7 +283,7 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
 # --- メイン処理 ---
 st.markdown("### **ドル円AI短期予測 (短期足専用版)**")
 
-# === 時間足選択（1時間足を削除） ===
+# === 時間足選択 ===
 timeframe = st.radio(
     "時間足を選択してください",
     ["15分足 (15m)", "5分足 (5m)"],
@@ -334,10 +348,28 @@ try:
     df_p['ds'] = df[date_c]
     df_p['y'] = df[close_c]
     
-    current_price = to_float(df_p['y'].iloc[-1])
-    current_trend_sma = to_float(df['Trend_SMA'].iloc[-1])
-    last_date = df_p['ds'].iloc[-1]
+    # ★現在値をここでも取得するが、あとでリアルタイム値で上書きする
+    current_price_chart = to_float(df_p['y'].iloc[-1])
+    last_date_chart = df_p['ds'].iloc[-1]
     
+    # ★【修正点】リアルタイム価格を別ルートで取得
+    realtime_price, realtime_time = get_realtime_price()
+    
+    # もしリアルタイム価格が取れたら、それを採用
+    if realtime_price is not None:
+        current_price = realtime_price
+        # チャートの最後の時刻より新しければ表示更新
+        display_time = realtime_time.strftime('%m/%d %H:%M')
+        
+        # もしチャートデータの最後と乖離が大きければ（月曜朝の窓開けなど）、
+        # 予測精度のため、チャートの最後の足をリアルタイム値に無理やり補正する（簡易的措置）
+        df_p.iloc[-1, df_p.columns.get_loc('y')] = realtime_price
+    else:
+        current_price = current_price_chart
+        display_time = last_date_chart.strftime('%m/%d %H:%M')
+
+    # トレンド判定
+    current_trend_sma = to_float(df['Trend_SMA'].iloc[-1])
     trend_dir = 0
     if not pd.isna(current_trend_sma):
         if current_price > current_trend_sma: trend_dir = 1 
@@ -346,7 +378,7 @@ try:
     st.write(f"**現在値 ({timeframe}): {current_price:,.2f} 円**")
     
     trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
-    st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (基準日時: {last_date.strftime('%m/%d %H:%M')})</span>", unsafe_allow_html=True)
+    st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (データ取得日時: {display_time})</span>", unsafe_allow_html=True)
 
     # --- Prophet予測 ---
     prior_scale = 0.05 if api_interval == "5m" else 0.15 
@@ -379,15 +411,15 @@ try:
 
     for val, label_text in target_configs:
         if time_unit == "hours":
-            target_time = last_date + timedelta(hours=val)
+            target_time = last_date_chart + timedelta(hours=val)
         else:
-            target_time = last_date + timedelta(minutes=val)
+            target_time = last_date_chart + timedelta(minutes=val)
             
         row = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
         pred = to_float(row['yhat'])
         
         prob_up, note = calculate_reversion_probability(
-            current_price, pred, 
+            current_price, pred, # ★ここは最新のリアルタイム価格を使う
             to_float(row['yhat_lower']), 
             to_float(row['yhat_upper']),
             min_width=min_width_setting,
