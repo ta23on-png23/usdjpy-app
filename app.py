@@ -83,26 +83,33 @@ def to_float(x):
         return float(x)
     except: return 0.0
 
-# --- ★追加機能: リアルタイム価格強制取得 ---
+# --- ★追加機能: リアルタイム価格強制取得 (強化版) ---
 def get_realtime_price():
     try:
-        # 1分足の最新データを取得して、現在値を強制更新する
         ticker = yf.Ticker("USDJPY=X")
-        # 直近1日分の1分足を取得
+        
+        # 現在時刻(JST)を取得
+        now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
+        
+        # 1. fast_info (速報値) を試す
+        try:
+            latest_price = ticker.fast_info.last_price
+            if latest_price and latest_price > 0:
+                return float(latest_price), now_jst
+        except:
+            pass
+
+        # 2. 直近1分足を取得してみる
         df_now = ticker.history(period="1d", interval="1m")
         if not df_now.empty:
             latest_price = float(df_now['Close'].iloc[-1])
-            # タイムゾーン処理
-            last_time = df_now.index[-1]
-            if last_time.tzinfo is None:
-                last_time = last_time.replace(tzinfo=pytz.utc)
-            last_time_jst = last_time.astimezone(pytz.timezone('Asia/Tokyo'))
-            return latest_price, last_time_jst
+            return latest_price, now_jst
+            
     except:
         pass
     return None, None
 
-# --- 強力データ取得関数 (分析用) ---
+# --- 強力データ取得関数 ---
 def get_forex_data_robust(interval="1h", period="1mo"):
     tickers_to_try = ["USDJPY=X", "JPY=X"]
     for ticker in tickers_to_try:
@@ -350,7 +357,6 @@ try:
     
     # ★現在値をここでも取得するが、あとでリアルタイム値で上書きする
     current_price_chart = to_float(df_p['y'].iloc[-1])
-    last_date_chart = df_p['ds'].iloc[-1]
     
     # ★【修正点】リアルタイム価格を別ルートで取得
     realtime_price, realtime_time = get_realtime_price()
@@ -361,12 +367,13 @@ try:
         # チャートの最後の時刻より新しければ表示更新
         display_time = realtime_time.strftime('%m/%d %H:%M')
         
-        # もしチャートデータの最後と乖離が大きければ（月曜朝の窓開けなど）、
-        # 予測精度のため、チャートの最後の足をリアルタイム値に無理やり補正する（簡易的措置）
+        # チャートの最後の足をリアルタイム値に無理やり補正する（AI予測の起点ズレ防止）
         df_p.iloc[-1, df_p.columns.get_loc('y')] = realtime_price
     else:
         current_price = current_price_chart
-        display_time = last_date_chart.strftime('%m/%d %H:%M')
+        # 取得できない場合も現在時刻を表示（ユーザーへの安心感のため）
+        now_jst_fallback = datetime.now(pytz.timezone('Asia/Tokyo'))
+        display_time = now_jst_fallback.strftime('%m/%d %H:%M')
 
     # トレンド判定
     current_trend_sma = to_float(df['Trend_SMA'].iloc[-1])
@@ -378,7 +385,7 @@ try:
     st.write(f"**現在値 ({timeframe}): {current_price:,.2f} 円**")
     
     trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
-    st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (データ取得日時: {display_time})</span>", unsafe_allow_html=True)
+    st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True)
 
     # --- Prophet予測 ---
     prior_scale = 0.05 if api_interval == "5m" else 0.15 
@@ -408,6 +415,9 @@ try:
     notes = []
     colors_up = []
     colors_down = []
+
+    # チャートの最後の時間を起点にする（リアルタイム反映済み）
+    last_date_chart = df_p['ds'].iloc[-1]
 
     for val, label_text in target_configs:
         if time_unit == "hours":
