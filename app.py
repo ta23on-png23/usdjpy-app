@@ -162,7 +162,7 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
-    # ★変更点: 過去72時間
+    # 過去72時間
     cutoff_date = df_merged['ds'].max() - timedelta(hours=72)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
@@ -267,25 +267,17 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
     return pd.DataFrame(results)
 
 # --- メイン処理 ---
-st.markdown("### **ドル円AI短期予測 (マルチタイムフレーム・トレンド補正版)**")
+st.markdown("### **ドル円AI短期予測 (短期足専用版)**")
 
-# === 時間足選択 ===
+# === 時間足選択（1時間足を削除） ===
 timeframe = st.radio(
     "時間足を選択してください",
-    ["1時間足 (1H)", "15分足 (15m)", "5分足 (5m)"],
+    ["15分足 (15m)", "5分足 (5m)"],
     horizontal=True
 )
 
 # 設定値の決定
-if timeframe == "1時間足 (1H)":
-    api_interval = "1h"
-    api_period = "1mo"
-    min_width_setting = 0.10
-    target_configs = [(1, "1H後"), (2, "2H後"), (4, "4H後"), (8, "8H後"), (12, "12H後")]
-    time_unit = "hours"
-    trend_window = 50 
-    
-elif timeframe == "15分足 (15m)":
+if timeframe == "15分足 (15m)":
     api_interval = "15m"
     api_period = "1mo"
     min_width_setting = 0.05
@@ -293,13 +285,21 @@ elif timeframe == "15分足 (15m)":
     time_unit = "minutes"
     trend_window = 80 
     
-else: # 5分足
+elif timeframe == "5分足 (5m)":
     api_interval = "5m"
     api_period = "5d" 
     min_width_setting = 0.03
     target_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後")]
     time_unit = "minutes"
     trend_window = 100 
+else:
+    # 万が一のためのフォールバック（通常ここは通らない）
+    api_interval = "15m"
+    api_period = "1mo"
+    min_width_setting = 0.05
+    target_configs = [(15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後"), (240, "4H後")]
+    time_unit = "minutes"
+    trend_window = 80 
 
 
 try:
@@ -354,16 +354,16 @@ try:
     
     m = Prophet(
         changepoint_prior_scale=prior_scale, 
-        daily_seasonality=True if api_interval == "1h" else False,
+        daily_seasonality=False, # 短期足なので日次季節性はオフ
         weekly_seasonality=True, 
         yearly_seasonality=False
     )
-    if api_interval in ["5m", "15m"]:
-        m.add_seasonality(name='hourly', period=1/24, fourier_order=5)
+    # 短期足用の周期追加
+    m.add_seasonality(name='hourly', period=1/24, fourier_order=5)
 
     m.fit(df_p)
     
-    freq_str = 'h' if api_interval == '1h' else ('15min' if api_interval == '15m' else '5min')
+    freq_str = '15min' if api_interval == '15m' else '5min'
     periods_needed = 30
     future = m.make_future_dataframe(periods=periods_needed, freq=freq_str)
     forecast = m.predict(future)
@@ -398,7 +398,7 @@ try:
         prob_down = 100.0 - prob_up
         
         price_diff = abs(pred - current_price)
-        threshold = 0.15 if api_interval == "1h" else (0.08 if api_interval == "15m" else 0.05)
+        threshold = 0.08 if api_interval == "15m" else 0.05
         
         if price_diff < threshold:
             c_up = '#808080'
@@ -574,31 +574,4 @@ try:
         ))
         
         # 基準線
-        lines_to_draw = [0, 100, -100, 200, -200, 300, -300]
-        for val in lines_to_draw:
-            color = 'white' if val == 0 else ('#333' if abs(val) < 300 else '#555')
-            width = 1 if val == 0 else 1
-            dash = 'solid' if val == 0 else 'dash'
-            fig_pnl.add_hline(y=val, line_dash=dash, line_color=color, line_width=width, annotation_text=f"{val} pips" if val !=0 else "±0")
-
-        vals_to_check = pd.concat([bt_results['P/L(pips)'], bt_results['Cumulative_PL']])
-        y_max = max(350, vals_to_check.max() + 50)
-        y_min = min(-350, vals_to_check.min() - 50)
-        
-        fig_pnl.update_layout(
-            template="plotly_dark",
-            height=400,
-            margin=dict(l=0, r=0, t=30, b=20),
-            yaxis=dict(title="pips", range=[y_min, y_max]),
-            xaxis=dict(title="決済日時", type='category'), 
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(fig_pnl, use_container_width=True, config={'staticPlot': True})
-
-        st.dataframe(bt_results, hide_index=True, use_container_width=True)
-    else:
-        st.info(f"過去72時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
-
-except Exception as e:
-    st.error(f"エラーが発生しました: {e}")
+        lines_to_draw =
