@@ -150,19 +150,20 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 (時間フィルター付き) ---
+# --- バックテスト機能 (時間フィルター付き・100時間版) ---
 def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window, threshold):
     """
-    過去48時間分のデータでテスト。
+    過去100時間分のデータでテスト。
     ルール:
     1. エントリー後、±15pipsに到達するまでポジションを保有し続ける。
     2. ポジション保有中は新規エントリーしない。
     3. 指定された閾値(threshold)以上でエントリー。
-    4. 【NEW】日本時間 02:00 ～ 08:59 の間はエントリーしない。
+    4. 日本時間 02:00 ～ 08:59 の間はエントリーしない。
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
-    cutoff_date = df_merged['ds'].max() - timedelta(hours=48)
+    # ★変更点: 過去48時間 -> 過去100時間
+    cutoff_date = df_merged['ds'].max() - timedelta(hours=100)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
     results = []
@@ -171,15 +172,14 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
     for i in range(len(backtest_data)):
         row = backtest_data.iloc[i]
         current_time = row['ds']
-        current_hour = current_time.hour # 時間を取得 (0-23)
+        current_hour = current_time.hour 
         
         o_price = to_float(row['Open'])
         h_price = to_float(row['High'])
         l_price = to_float(row['Low'])
         c_price = to_float(row['Close'])
         
-        # --- 1. 決済判定 (保有中の場合) ---
-        # 決済は時間帯に関わらず実行する（ポジション解消のため）
+        # --- 1. 決済判定 ---
         if active_trade is not None:
             outcome = None
             pnl = 0.0
@@ -216,9 +216,9 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
                 active_trade = None 
                 continue 
         
-        # --- 2. 新規エントリー判定 (ノーポジの場合) ---
+        # --- 2. 新規エントリー判定 ---
         if active_trade is None:
-            # ★時間フィルター: 2時台〜8時台 (02:00 <= time <= 08:59) はエントリーしない
+            # 時間フィルター: 2時〜8時はエントリーしない
             if 2 <= current_hour < 9:
                 continue
 
@@ -295,7 +295,7 @@ elif timeframe == "15分足 (15m)":
     
 else: # 5分足
     api_interval = "5m"
-    api_period = "5d"
+    api_period = "5d" # 5日分取得すれば120時間なので100時間バックテスト可能
     min_width_setting = 0.03
     target_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後")]
     time_unit = "minutes"
@@ -507,7 +507,7 @@ try:
 
     # --- バックテスト結果表示 ---
     st.markdown("---")
-    st.markdown("### 🔙 **過去48時間のバックテスト (保有継続版)**")
+    st.markdown("### 🔙 **過去100時間のバックテスト (保有継続・時間フィルター版)**")
     
     entry_threshold = st.slider(
         "エントリー判定閾値 (%)", 
@@ -526,7 +526,6 @@ try:
     </div>
     """, unsafe_allow_html=True)
     
-    # 時間フィルターを追加した関数を呼び出し
     bt_results = perform_backtest_persistent(df, forecast, min_width_setting, trend_window, entry_threshold)
     
     if not bt_results.empty:
@@ -599,7 +598,7 @@ try:
 
         st.dataframe(bt_results, hide_index=True, use_container_width=True)
     else:
-        st.info(f"過去48時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
+        st.info(f"過去100時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
 
 except Exception as e:
     st.error(f"エラーが発生しました: {e}")
