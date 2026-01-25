@@ -150,14 +150,15 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 (保有継続・可変閾値版) ---
+# --- バックテスト機能 (時間フィルター付き) ---
 def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window, threshold):
     """
     過去48時間分のデータでテスト。
     ルール:
-    1. エントリー後、±15pipsに到達するまでポジションを保有し続ける（時間制限なし）。
-    2. ポジション保有中は新規エントリーしない（常に1ポジション）。
+    1. エントリー後、±15pipsに到達するまでポジションを保有し続ける。
+    2. ポジション保有中は新規エントリーしない。
     3. 指定された閾値(threshold)以上でエントリー。
+    4. 【NEW】日本時間 02:00 ～ 08:59 の間はエントリーしない。
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
@@ -170,13 +171,15 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
     for i in range(len(backtest_data)):
         row = backtest_data.iloc[i]
         current_time = row['ds']
+        current_hour = current_time.hour # 時間を取得 (0-23)
         
         o_price = to_float(row['Open'])
         h_price = to_float(row['High'])
         l_price = to_float(row['Low'])
         c_price = to_float(row['Close'])
         
-        # --- 1. 決済判定 ---
+        # --- 1. 決済判定 (保有中の場合) ---
+        # 決済は時間帯に関わらず実行する（ポジション解消のため）
         if active_trade is not None:
             outcome = None
             pnl = 0.0
@@ -213,8 +216,12 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
                 active_trade = None 
                 continue 
         
-        # --- 2. 新規エントリー判定 ---
+        # --- 2. 新規エントリー判定 (ノーポジの場合) ---
         if active_trade is None:
+            # ★時間フィルター: 2時台〜8時台 (02:00 <= time <= 08:59) はエントリーしない
+            if 2 <= current_hour < 9:
+                continue
+
             pred = to_float(row['yhat'])
             
             current_trend_sma = to_float(row['Trend_SMA']) if 'Trend_SMA' in row else c_price
@@ -230,7 +237,6 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
             )
             
             action = None
-            # ★閾値をスライダーの値(threshold)で判定
             if prob_up >= threshold:
                 action = "BUY"
             elif prob_up <= (100.0 - threshold):
@@ -503,24 +509,24 @@ try:
     st.markdown("---")
     st.markdown("### 🔙 **過去48時間のバックテスト (保有継続版)**")
     
-    # ★スライダーの追加
     entry_threshold = st.slider(
         "エントリー判定閾値 (%)", 
         min_value=70, 
         max_value=95, 
-        value=80, # デフォルト80%
+        value=80, 
         step=5,
-        help="AIの確信度がこの数値以上の場合のみエントリーします。数値を上げると勝率は上がりますが、取引回数は減ります。"
+        help="AIの確信度がこの数値以上の場合のみエントリーします。"
     )
 
     st.markdown(f"""
     <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
     ルール: AIの方向確率が <b>{entry_threshold}%</b> を超えた時点でエントリー。ポジションは常に1つ。<br>
-    ±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。
+    ±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。<br>
+    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span>
     </div>
     """, unsafe_allow_html=True)
     
-    # スライダーの値を関数に渡す
+    # 時間フィルターを追加した関数を呼び出し
     bt_results = perform_backtest_persistent(df, forecast, min_width_setting, trend_window, entry_threshold)
     
     if not bt_results.empty:
