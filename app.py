@@ -83,31 +83,24 @@ def to_float(x):
         return float(x)
     except: return 0.0
 
-# --- ★追加機能: リアルタイム価格強制取得 (強化版) ---
-def get_realtime_price():
+# --- ★追加機能: リアルタイム価格 & 履歴取得 ---
+# 過去の分析用に、直近のデータをDataFrameごと返すように変更
+def get_realtime_data():
     try:
         ticker = yf.Ticker("USDJPY=X")
+        # 直近5日間の1分足を取得（過去の振り返り用）
+        df_now = ticker.history(period="5d", interval="1m")
         
-        # 現在時刻(JST)を取得
-        now_jst = datetime.now(pytz.timezone('Asia/Tokyo'))
-        
-        # 1. fast_info (速報値) を試す
-        try:
-            latest_price = ticker.fast_info.last_price
-            if latest_price and latest_price > 0:
-                return float(latest_price), now_jst
-        except:
-            pass
-
-        # 2. 直近1分足を取得してみる
-        df_now = ticker.history(period="1d", interval="1m")
         if not df_now.empty:
+            # タイムゾーンをJSTに変換
+            df_now.index = df_now.index.tz_convert('Asia/Tokyo')
             latest_price = float(df_now['Close'].iloc[-1])
-            return latest_price, now_jst
+            latest_time = df_now.index[-1]
+            return latest_price, latest_time, df_now
             
     except:
         pass
-    return None, None
+    return None, None, pd.DataFrame()
 
 # --- 強力データ取得関数 ---
 def get_forex_data_robust(interval="1h", period="1mo"):
@@ -177,7 +170,7 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 ---
+# --- バックテスト機能 (時間フィルター付き・72時間版) ---
 def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window, threshold):
     """
     過去72時間分のデータでテスト。
@@ -302,7 +295,8 @@ if timeframe == "15分足 (15m)":
     api_interval = "15m"
     api_period = "1mo"
     min_width_setting = 0.05
-    target_configs = [(15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後"), (240, "4H後")]
+    future_configs = [(15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後"), (240, "4H後")]
+    past_configs = [(15, "15分前"), (30, "30分前"), (60, "1H前"), (120, "2H前")] # 過去設定
     time_unit = "minutes"
     trend_window = 80 
     
@@ -310,14 +304,16 @@ elif timeframe == "5分足 (5m)":
     api_interval = "5m"
     api_period = "5d" 
     min_width_setting = 0.03
-    target_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後")]
+    future_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後")]
+    past_configs = [(5, "5分前"), (15, "15分前"), (30, "30分前"), (60, "1H前"), (120, "2H前")] # 過去設定
     time_unit = "minutes"
     trend_window = 100 
 else:
     api_interval = "15m"
     api_period = "1mo"
     min_width_setting = 0.05
-    target_configs = [(15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後"), (240, "4H後")]
+    future_configs = [(15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後"), (240, "4H後")]
+    past_configs = [(15, "15分前"), (30, "30分前"), (60, "1H前")]
     time_unit = "minutes"
     trend_window = 80 
 
@@ -355,25 +351,25 @@ try:
     df_p['ds'] = df[date_c]
     df_p['y'] = df[close_c]
     
-    # ★現在値をここでも取得するが、あとでリアルタイム値で上書きする
     current_price_chart = to_float(df_p['y'].iloc[-1])
     
-    # ★【修正点】リアルタイム価格を別ルートで取得
-    realtime_price, realtime_time = get_realtime_price()
+    # ★【修正点】リアルタイム価格と履歴を取得
+    realtime_price, realtime_time, df_recent_1m = get_realtime_data()
     
     # もしリアルタイム価格が取れたら、それを採用
     if realtime_price is not None:
         current_price = realtime_price
-        # チャートの最後の時刻より新しければ表示更新
         display_time = realtime_time.strftime('%m/%d %H:%M')
-        
-        # チャートの最後の足をリアルタイム値に無理やり補正する（AI予測の起点ズレ防止）
+        # チャートの最後の足を補正
         df_p.iloc[-1, df_p.columns.get_loc('y')] = realtime_price
+        
+        # 基準時刻もリアルタイムに合わせる
+        current_base_time = realtime_time.replace(tzinfo=None) # Prophet用はnaiveにする
     else:
         current_price = current_price_chart
-        # 取得できない場合も現在時刻を表示（ユーザーへの安心感のため）
         now_jst_fallback = datetime.now(pytz.timezone('Asia/Tokyo'))
         display_time = now_jst_fallback.strftime('%m/%d %H:%M')
+        current_base_time = df_p['ds'].iloc[-1]
 
     # トレンド判定
     current_trend_sma = to_float(df['Trend_SMA'].iloc[-1])
@@ -400,13 +396,88 @@ try:
 
     m.fit(df_p)
     
+    # 週末などを考慮して多めに予測枠を作る
     freq_str = '15min' if api_interval == '15m' else '5min'
-    periods_needed = 30
-    future = m.make_future_dataframe(periods=periods_needed, freq=freq_str)
+    future = m.make_future_dataframe(periods=100, freq=freq_str)
     forecast = m.predict(future)
 
-    # --- 予測結果抽出 ---
-    st.markdown("#### **短期予測 (上昇 vs 下落)**")
+    # =========================================
+    #  過去データ分析 (5分前〜2時間前)
+    # =========================================
+    st.markdown("#### **📉 直近のAI判断 (過去の答え合わせ)**")
+    
+    past_data_list = []
+    
+    for val, label_text in past_configs:
+        # ターゲット時刻 (現在 - X分)
+        target_time = current_base_time - timedelta(minutes=val)
+        
+        # 1. その時点の「実際の価格」を探す
+        # df_recent_1m (1分足) があればそこから探す（精度高い）、なければ df (5分足など) から
+        past_actual_price = None
+        
+        if not df_recent_1m.empty:
+            # タイムゾーンなしに変換して比較
+            df_recent_1m_naive = df_recent_1m.copy()
+            df_recent_1m_naive.index = df_recent_1m_naive.index.tz_localize(None)
+            
+            # target_timeに最も近いindexを探す
+            try:
+                idx = df_recent_1m_naive.index.get_indexer([target_time], method='nearest')[0]
+                # 時間差があまりに大きい場合は除外 (例: 週末挟んでデータがない場合)
+                found_time = df_recent_1m_naive.index[idx]
+                if abs((found_time - target_time).total_seconds()) < 600: # 10分以内の誤差なら許容
+                    past_actual_price = float(df_recent_1m_naive['Close'].iloc[idx])
+            except:
+                pass
+        
+        if past_actual_price is None:
+            # メインdfから探す
+            try:
+                row_past = df_p.iloc[(df_p['ds'] - target_time).abs().argsort()[:1]].iloc[0]
+                if abs((row_past['ds'] - target_time).total_seconds()) < 3600: # 1時間以内
+                    past_actual_price = to_float(row_past['y'])
+            except:
+                pass
+
+        # 2. その時点の「AI予測値(yhat)」を探す
+        row_fc = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
+        past_pred = to_float(row_fc['yhat'])
+        
+        # 3. 判定
+        if past_actual_price is not None:
+            # 過去時点での確率計算
+            p_up, note = calculate_reversion_probability(
+                past_actual_price, past_pred, 
+                to_float(row_fc['yhat_lower']), 
+                to_float(row_fc['yhat_upper']),
+                min_width=min_width_setting,
+                trend_direction=trend_dir 
+            )
+            p_down = 100.0 - p_up
+            
+            # 結果表示用
+            past_data_list.append({
+                "時間": label_text,
+                "当時のレート": f"{past_actual_price:.2f} 円",
+                "AIトレンド判定": f"上 {p_up:.0f}% / 下 {p_down:.0f}%",
+                "乖離状況": note
+            })
+        else:
+             past_data_list.append({
+                "時間": label_text,
+                "当時のレート": "取得不可",
+                "AIトレンド判定": "-",
+                "乖離状況": "データなし"
+            })
+
+    st.dataframe(pd.DataFrame(past_data_list), hide_index=True, use_container_width=True)
+
+
+    # =========================================
+    #  未来予測 (5分後〜2時間後)
+    # =========================================
+    st.markdown("#### **📈 短期予測 (上昇 vs 下落)**")
     
     probs_up = []
     probs_down = []
@@ -416,20 +487,14 @@ try:
     colors_up = []
     colors_down = []
 
-    # チャートの最後の時間を起点にする（リアルタイム反映済み）
-    last_date_chart = df_p['ds'].iloc[-1]
-
-    for val, label_text in target_configs:
-        if time_unit == "hours":
-            target_time = last_date_chart + timedelta(hours=val)
-        else:
-            target_time = last_date_chart + timedelta(minutes=val)
+    for val, label_text in future_configs:
+        target_time = current_base_time + timedelta(minutes=val)
             
         row = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
         pred = to_float(row['yhat'])
         
         prob_up, note = calculate_reversion_probability(
-            current_price, pred, # ★ここは最新のリアルタイム価格を使う
+            current_price, pred, 
             to_float(row['yhat_lower']), 
             to_float(row['yhat_upper']),
             min_width=min_width_setting,
