@@ -6,14 +6,24 @@ from scipy.stats import norm
 import plotly.graph_objs as go
 from datetime import timedelta, datetime
 import pytz
+import requests
+import json
+from streamlit_autorefresh import st_autorefresh
 
 # ==========================================
-#  設定：パスワード
+#  設定：パスワード & LINE連携
 # ==========================================
 DEMO_PASSWORD = "demo" 
 
+# ★ここにLINE Developersで取得した情報を入力してください★
+LINE_CHANNEL_ACCESS_TOKEN = "ここにアクセストークンを貼り付け" 
+LINE_USER_ID = "ここにあなたのユーザーIDを貼り付け" 
+
 # --- ページ設定 ---
-st.set_page_config(page_title="ドル円AI短期予測", layout="wide")
+st.set_page_config(page_title="ドル円AI短期予測 (5分足固定版)", layout="wide")
+
+# --- 自動更新設定 (5分 = 300,000ミリ秒) ---
+count = st_autorefresh(interval=300000, limit=None, key="fizzbuzzcounter")
 
 # --- UI非表示 & 黒背景デザイン (CSS) ---
 st.markdown("""
@@ -73,6 +83,26 @@ def check_password():
 if not check_password():
     st.stop()
 
+# --- LINE通知関数 ---
+def send_line_notification(message):
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID or "ここに" in LINE_CHANNEL_ACCESS_TOKEN:
+        return False
+
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": message}]
+    }
+    try:
+        requests.post(url, headers=headers, data=json.dumps(data))
+        return True
+    except:
+        return False
+
 # --- 数値変換 ---
 def to_float(x):
     try:
@@ -83,39 +113,35 @@ def to_float(x):
         return float(x)
     except: return 0.0
 
-# --- ★追加機能: リアルタイム価格 & 履歴取得 ---
-# 過去の分析用に、直近のデータをDataFrameごと返すように変更
+# --- リアルタイム価格強制取得 ---
 def get_realtime_data():
     try:
         ticker = yf.Ticker("USDJPY=X")
-        # 直近5日間の1分足を取得（過去の振り返り用）
         df_now = ticker.history(period="5d", interval="1m")
-        
         if not df_now.empty:
-            # タイムゾーンをJSTに変換
             df_now.index = df_now.index.tz_convert('Asia/Tokyo')
             latest_price = float(df_now['Close'].iloc[-1])
             latest_time = df_now.index[-1]
             return latest_price, latest_time, df_now
-            
     except:
         pass
     return None, None, pd.DataFrame()
 
 # --- 強力データ取得関数 ---
-def get_forex_data_robust(interval="1h", period="1mo"):
+def get_forex_data_robust():
     tickers_to_try = ["USDJPY=X", "JPY=X"]
     for ticker in tickers_to_try:
         try:
-            temp_df = yf.download(ticker, period=period, interval=interval, progress=False)
-            if not temp_df.empty and len(temp_df) > 10:
+            # 5分足を直近5日分取得
+            temp_df = yf.download(ticker, period="5d", interval="5m", progress=False)
+            if not temp_df.empty and len(temp_df) > 20:
                 return temp_df
         except:
             pass
     return pd.DataFrame()
 
 # --- 乖離判定付き確率計算 ---
-def calculate_reversion_probability(current_price, predicted_price, lower_bound, upper_bound, min_width=0.10, trend_direction=0):
+def calculate_reversion_probability(current_price, predicted_price, lower_bound, upper_bound, min_width=0.03, trend_direction=0):
     c = to_float(current_price)
     p = to_float(predicted_price)
     l = to_float(lower_bound)
@@ -177,8 +203,12 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
     """
     df_merged = pd.merge(df, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df.columns[0], right_on='ds', how='inner')
     
-    cutoff_date = df_merged['ds'].max() - timedelta(hours=72)
-    backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
+    # 最後の行（現在進行中の足）が含まれていると結果が揺れるため除外
+    # ただし、リアルタイム判定には使うため、ここではバックテスト用にコピーして処理
+    df_fixed = df_merged.copy()
+    
+    cutoff_date = df_fixed['ds'].max() - timedelta(hours=72)
+    backtest_data = df_fixed[df_fixed['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
     results = []
     active_trade = None 
@@ -281,46 +311,28 @@ def perform_backtest_persistent(df, forecast_df, min_width_setting, trend_window
     return pd.DataFrame(results)
 
 # --- メイン処理 ---
-st.markdown("### **ドル円AI短期予測 (短期足専用版)**")
+st.markdown("### **ドル円AI短期予測 (5分足専用・固定検証版)**")
 
-# === 時間足選択 ===
-timeframe = st.radio(
-    "時間足を選択してください",
-    ["15分足 (15m)", "5分足 (5m)"],
-    horizontal=True
+# === 時間足は5分固定 ===
+timeframe = "5分足 (5m)"
+api_interval = "5m"
+api_period = "5d" # 5日分取得
+min_width_setting = 0.03
+future_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後")]
+past_configs = [(5, "5分前"), (15, "15分前"), (30, "30分前"), (60, "1H前")]
+time_unit = "minutes"
+trend_window = 100 
+
+# === 通知設定 ===
+notify_threshold = st.slider(
+    "🔔 LINE通知判定 / エントリー閾値 (%)",
+    min_value=70, max_value=95, value=80, step=5,
+    help="この確率を超えた場合、LINE通知を行い、バックテストのエントリー基準としても使用します。"
 )
 
-# 設定値の決定
-if timeframe == "15分足 (15m)":
-    api_interval = "15m"
-    api_period = "1mo"
-    min_width_setting = 0.05
-    future_configs = [(15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後"), (240, "4H後")]
-    past_configs = [(15, "15分前"), (30, "30分前"), (60, "1H前"), (120, "2H前")] # 過去設定
-    time_unit = "minutes"
-    trend_window = 80 
-    
-elif timeframe == "5分足 (5m)":
-    api_interval = "5m"
-    api_period = "5d" 
-    min_width_setting = 0.03
-    future_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後")]
-    past_configs = [(5, "5分前"), (15, "15分前"), (30, "30分前"), (60, "1H前"), (120, "2H前")] # 過去設定
-    time_unit = "minutes"
-    trend_window = 100 
-else:
-    api_interval = "15m"
-    api_period = "1mo"
-    min_width_setting = 0.05
-    future_configs = [(15, "15分後"), (30, "30分後"), (60, "1H後"), (120, "2H後"), (240, "4H後")]
-    past_configs = [(15, "15分前"), (30, "30分前"), (60, "1H前")]
-    time_unit = "minutes"
-    trend_window = 80 
-
-
 try:
-    with st.spinner(f'{timeframe} データ取得中...'):
-        df = get_forex_data_robust(interval=api_interval, period=api_period)
+    with st.spinner('5分足データ取得中...'):
+        df = get_forex_data_robust()
 
     if df.empty:
         st.error("データが取得できませんでした。時間をおいて再接続してください。")
@@ -351,359 +363,66 @@ try:
     df_p['ds'] = df[date_c]
     df_p['y'] = df[close_c]
     
-    current_price_chart = to_float(df_p['y'].iloc[-1])
+    # --- ★【重要】AI学習データの固定化 ---
+    # 最後の行（現在進行中の足）を除外して学習させることで、次の足が確定するまで結果を固定する
+    df_train = df_p.iloc[:-1].copy()
     
-    # ★【修正点】リアルタイム価格と履歴を取得
-    realtime_price, realtime_time, df_recent_1m = get_realtime_data()
-    
-    # もしリアルタイム価格が取れたら、それを採用
-    if realtime_price is not None:
-        current_price = realtime_price
-        display_time = realtime_time.strftime('%m/%d %H:%M')
-        # チャートの最後の足を補正
-        df_p.iloc[-1, df_p.columns.get_loc('y')] = realtime_price
-        
-        # 基準時刻もリアルタイムに合わせる
-        current_base_time = realtime_time.replace(tzinfo=None) # Prophet用はnaiveにする
-    else:
-        current_price = current_price_chart
-        now_jst_fallback = datetime.now(pytz.timezone('Asia/Tokyo'))
-        display_time = now_jst_fallback.strftime('%m/%d %H:%M')
-        current_base_time = df_p['ds'].iloc[-1]
-
-    # トレンド判定
-    current_trend_sma = to_float(df['Trend_SMA'].iloc[-1])
-    trend_dir = 0
-    if not pd.isna(current_trend_sma):
-        if current_price > current_trend_sma: trend_dir = 1 
-        else: trend_dir = -1 
-
-    st.write(f"**現在値 ({timeframe}): {current_price:,.2f} 円**")
-    
-    trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
-    st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True)
-
-    # --- Prophet予測 ---
-    prior_scale = 0.05 if api_interval == "5m" else 0.15 
-    
+    # Prophet学習
     m = Prophet(
-        changepoint_prior_scale=prior_scale, 
+        changepoint_prior_scale=0.15, 
         daily_seasonality=False,
         weekly_seasonality=True, 
         yearly_seasonality=False
     )
     m.add_seasonality(name='hourly', period=1/24, fourier_order=5)
-
-    m.fit(df_p)
+    m.fit(df_train) # 確定足のみで学習
     
-    # 週末などを考慮して多めに予測枠を作る
-    freq_str = '15min' if api_interval == '15m' else '5min'
-    future = m.make_future_dataframe(periods=100, freq=freq_str)
+    # 予測作成
+    future = m.make_future_dataframe(periods=40, freq='5min')
     forecast = m.predict(future)
 
+    # --- 現在値の表示 (ここはリアルタイム) ---
+    realtime_price, realtime_time, df_recent_1m = get_realtime_data()
+    
+    # チャートの最後の確定足データ
+    last_fixed_price = to_float(df_p['y'].iloc[-2]) # 確定足の終値
+    last_fixed_date = df_p['ds'].iloc[-2]
+
+    if realtime_price is not None:
+        current_price = realtime_price
+        display_time = realtime_time.strftime('%m/%d %H:%M')
+        # 現在進行中の足のデータをリアルタイム値で更新（表示用）
+        # ただしAI学習には使わない
+    else:
+        current_price = to_float(df_p['y'].iloc[-1])
+        now_jst_fallback = datetime.now(pytz.timezone('Asia/Tokyo'))
+        display_time = now_jst_fallback.strftime('%m/%d %H:%M')
+
+    # トレンド判定 (確定足ベース)
+    current_trend_sma = to_float(df['Trend_SMA'].iloc[-2])
+    trend_dir = 0
+    if not pd.isna(current_trend_sma):
+        if last_fixed_price > current_trend_sma: trend_dir = 1 
+        else: trend_dir = -1 
+
+    st.write(f"**現在値 ({timeframe}): {current_price:,.2f} 円**")
+    trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
+    st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True)
+
     # =========================================
-    #  過去データ分析 (5分前〜2時間前)
+    #  過去データ分析
     # =========================================
     st.markdown("#### **📉 直近のAI判断 (過去の答え合わせ)**")
     
     past_data_list = []
     
     for val, label_text in past_configs:
-        # ターゲット時刻 (現在 - X分)
-        target_time = current_base_time - timedelta(minutes=val)
+        # 基準は「最後の確定足」の時間
+        target_time = last_fixed_date - timedelta(minutes=val)
         
         # 1. その時点の「実際の価格」を探す
-        # df_recent_1m (1分足) があればそこから探す（精度高い）、なければ df (5分足など) から
         past_actual_price = None
-        
-        if not df_recent_1m.empty:
-            # タイムゾーンなしに変換して比較
-            df_recent_1m_naive = df_recent_1m.copy()
-            df_recent_1m_naive.index = df_recent_1m_naive.index.tz_localize(None)
-            
-            # target_timeに最も近いindexを探す
-            try:
-                idx = df_recent_1m_naive.index.get_indexer([target_time], method='nearest')[0]
-                # 時間差があまりに大きい場合は除外 (例: 週末挟んでデータがない場合)
-                found_time = df_recent_1m_naive.index[idx]
-                if abs((found_time - target_time).total_seconds()) < 600: # 10分以内の誤差なら許容
-                    past_actual_price = float(df_recent_1m_naive['Close'].iloc[idx])
-            except:
-                pass
-        
-        if past_actual_price is None:
-            # メインdfから探す
-            try:
-                row_past = df_p.iloc[(df_p['ds'] - target_time).abs().argsort()[:1]].iloc[0]
-                if abs((row_past['ds'] - target_time).total_seconds()) < 3600: # 1時間以内
-                    past_actual_price = to_float(row_past['y'])
-            except:
-                pass
-
-        # 2. その時点の「AI予測値(yhat)」を探す
-        row_fc = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
-        past_pred = to_float(row_fc['yhat'])
-        
-        # 3. 判定
-        if past_actual_price is not None:
-            # 過去時点での確率計算
-            p_up, note = calculate_reversion_probability(
-                past_actual_price, past_pred, 
-                to_float(row_fc['yhat_lower']), 
-                to_float(row_fc['yhat_upper']),
-                min_width=min_width_setting,
-                trend_direction=trend_dir 
-            )
-            p_down = 100.0 - p_up
-            
-            # 結果表示用
-            past_data_list.append({
-                "時間": label_text,
-                "当時のレート": f"{past_actual_price:.2f} 円",
-                "AIトレンド判定": f"上 {p_up:.0f}% / 下 {p_down:.0f}%",
-                "乖離状況": note
-            })
-        else:
-             past_data_list.append({
-                "時間": label_text,
-                "当時のレート": "取得不可",
-                "AIトレンド判定": "-",
-                "乖離状況": "データなし"
-            })
-
-    st.dataframe(pd.DataFrame(past_data_list), hide_index=True, use_container_width=True)
-
-
-    # =========================================
-    #  未来予測 (5分後〜2時間後)
-    # =========================================
-    st.markdown("#### **📈 短期予測 (上昇 vs 下落)**")
-    
-    probs_up = []
-    probs_down = []
-    labels = []
-    prices = []
-    notes = []
-    colors_up = []
-    colors_down = []
-
-    for val, label_text in future_configs:
-        target_time = current_base_time + timedelta(minutes=val)
-            
-        row = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
-        pred = to_float(row['yhat'])
-        
-        prob_up, note = calculate_reversion_probability(
-            current_price, pred, 
-            to_float(row['yhat_lower']), 
-            to_float(row['yhat_upper']),
-            min_width=min_width_setting,
-            trend_direction=trend_dir 
-        )
-        prob_down = 100.0 - prob_up
-        
-        price_diff = abs(pred - current_price)
-        threshold = 0.08 if api_interval == "15m" else 0.05
-        
-        if price_diff < threshold:
-            c_up = '#808080'
-            c_down = '#808080'
-            note = f"誤差範囲 (変動幅 {price_diff:.2f}円)"
-        else:
-            c_up = '#00cc96'
-            c_down = '#ff4b4b'
-        
-        probs_up.append(prob_up)
-        probs_down.append(prob_down)
-        labels.append(label_text)
-        prices.append(pred)
-        notes.append(note)
-        colors_up.append(c_up)
-        colors_down.append(c_down)
-
-    # --- 棒グラフ ---
-    fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(x=labels, y=probs_up, name='上昇確率', text=[f"{p:.1f}%" for p in probs_up], textposition='auto', marker_color=colors_up))
-    fig_bar.add_trace(go.Bar(x=labels, y=probs_down, name='下落確率', text=[f"{p:.1f}%" for p in probs_down], textposition='auto', marker_color=colors_down))
-    
-    fig_bar.update_layout(
-        template="plotly_dark",
-        height=250,
-        margin=dict(l=0, r=0, t=30, b=20),
-        yaxis=dict(range=[0, 100], title="確率 (%)"),
-        barmode='group',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig_bar, use_container_width=True, config={'staticPlot': True})
-
-    # 詳細数値
-    st.markdown("#### **詳細数値 & AI判断**")
-    detail_data = {
-        "時間": labels,
-        "予測レート": [f"{p:.2f} 円" for p in prices],
-        "上昇確率": [f"{p:.1f} %" for p in probs_up],
-        "下落確率": [f"{p:.1f} %" for p in probs_down],
-        "判定/状況": notes
-    }
-    st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
-
-    # --- チャート表示 ---
-    st.markdown("#### **推移・AI軌道・テクニカル指標**")
-    
-    fig_chart = go.Figure()
-
-    # ボリンジャーバンド
-    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
-    fig_chart.add_trace(go.Scatter(
-        x=df[date_c], y=df['BB_Lower'], mode='lines', line=dict(width=0),
-        fill='tonexty', 
-        fillcolor='rgba(138, 43, 226, 0.3)', 
-        name='BB(±2σ)', hoverinfo='skip'
-    ))
-
-    # ローソク足
-    fig_chart.add_trace(go.Candlestick(
-        x=df[date_c],
-        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        name='実測',
-        increasing=dict(line=dict(color='#00cc96', width=1), fillcolor='rgba(0,0,0,0)'),
-        decreasing=dict(line=dict(color='#ff4b4b', width=1), fillcolor='rgba(0,0,0,0)')
-    ))
-
-    # SMA
-    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['SMA20'], mode='lines', name='20SMA (短期)', line=dict(color='cyan', width=1.5)))
-    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['Trend_SMA'], mode='lines', name='長期トレンド線', line=dict(color='orange', width=2, dash='dash')))
-    
-    # AI予測
-    fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
-    fig_chart.add_trace(go.Scatter(
-        x=forecast['ds'], y=forecast['yhat_lower'], mode='lines', line=dict(width=0),
-        fill='tonexty', 
-        fillcolor='rgba(255, 255, 0, 0.4)', 
-        hoverinfo='skip', showlegend=False, name='AI予測範囲'
-    ))
-    fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='AI軌道', line=dict(color='yellow', width=2)))
-
-    # 表示範囲
-    x_max = forecast['ds'].max()
-    x_min = df[date_c].min() 
-    y_range_min = current_price - 4.0
-    y_range_max = current_price + 4.0
-
-    fig_chart.update_layout(
-        template="plotly_dark",
-        height=600,
-        plot_bgcolor='#000000',
-        margin=dict(l=0, r=0, t=10, b=0),
-        xaxis=dict(
-            range=[x_min, x_max],
-            type="date",
-            fixedrange=False,
-            rangeslider=dict(visible=False)
-        ),
-        yaxis=dict(
-            range=[y_range_min, y_range_max],
-            fixedrange=True
-        ),
-        showlegend=True
-    )
-    
-    st.plotly_chart(fig_chart, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
-
-    # --- バックテスト結果表示 ---
-    st.markdown("---")
-    st.markdown("### 🔙 **過去72時間のバックテスト (保有継続・時間フィルター版)**")
-    
-    entry_threshold = st.slider(
-        "エントリー判定閾値 (%)", 
-        min_value=70, 
-        max_value=95, 
-        value=80, 
-        step=5,
-        help="AIの確信度がこの数値以上の場合のみエントリーします。"
-    )
-
-    st.markdown(f"""
-    <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
-    ルール: AIの方向確率が <b>{entry_threshold}%</b> を超えた時点でエントリー。ポジションは常に1つ。<br>
-    ±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。<br>
-    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    bt_results = perform_backtest_persistent(df, forecast, min_width_setting, trend_window, entry_threshold)
-    
-    if not bt_results.empty:
-        total_trades = len(bt_results)
-        wins = len(bt_results[bt_results['結果'] == "WIN"])
-        losses = len(bt_results[bt_results['結果'] == "LOSS"])
-        
-        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
-        total_pips = bt_results['P/L(pips)'].sum()
-        
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("総取引回数", f"{total_trades} 回")
-        col2.metric("勝率", f"{win_rate:.1f} %")
-        col3.metric("合計獲得pips", f"{total_pips:+.1f} pips", delta_color="normal")
-        col4.metric("内訳", f"勝{wins} / 負{losses}")
-        
-        # --- 損益推移グラフ ---
-        st.markdown("### 📊 **損益推移 (単独 & 累積)**")
-        
-        bt_results['Cumulative_PL'] = bt_results['P/L(pips)'].cumsum()
-        
-        fig_pnl = go.Figure()
-        
-        # 1. 単独損益
-        bar_colors = []
-        for val in bt_results['P/L(pips)']:
-            if val > 0: bar_colors.append('#00cc96') 
-            elif val < 0: bar_colors.append('#ff4b4b') 
-            else: bar_colors.append('#808080')
-
-        fig_pnl.add_trace(go.Bar(
-            x=bt_results['決済日時'], 
-            y=bt_results['P/L(pips)'],
-            name='単独損益',
-            marker_color=bar_colors,
-            opacity=0.6
-        ))
-        
-        # 2. 累積損益
-        fig_pnl.add_trace(go.Scatter(
-            x=bt_results['決済日時'], 
-            y=bt_results['Cumulative_PL'], 
-            mode='lines+markers', 
-            name='累積損益',
-            line=dict(color='yellow', width=3)
-        ))
-        
-        # 基準線
-        lines_to_draw = [0, 100, -100, 200, -200, 300, -300]
-        for val in lines_to_draw:
-            color = 'white' if val == 0 else ('#333' if abs(val) < 300 else '#555')
-            width = 1 if val == 0 else 1
-            dash = 'solid' if val == 0 else 'dash'
-            fig_pnl.add_hline(y=val, line_dash=dash, line_color=color, line_width=width, annotation_text=f"{val} pips" if val !=0 else "±0")
-
-        vals_to_check = pd.concat([bt_results['P/L(pips)'], bt_results['Cumulative_PL']])
-        y_max = max(350, vals_to_check.max() + 50)
-        y_min = min(-350, vals_to_check.min() - 50)
-        
-        fig_pnl.update_layout(
-            template="plotly_dark",
-            height=400,
-            margin=dict(l=0, r=0, t=30, b=20),
-            yaxis=dict(title="pips", range=[y_min, y_max]),
-            xaxis=dict(title="決済日時", type='category'), 
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(fig_pnl, use_container_width=True, config={'staticPlot': True})
-
-        st.dataframe(bt_results, hide_index=True, use_container_width=True)
-    else:
-        st.info(f"過去72時間以内に条件(確率{entry_threshold}%以上)を満たすエントリーポイントはありませんでした。")
-
-except Exception as e:
-    st.error(f"エラーが発生しました: {e}")
+        try:
+            row_past = df_p.iloc[(df_p['ds'] - target_time).abs().argsort()[:1]].iloc[0]
+            if abs((row_past['ds'] - target_time).total_seconds()) < 600:
+                past_actual_price = to_float(row_past['y
