@@ -16,7 +16,8 @@ DEMO_PASSWORD = "demo"
 # --- ページ設定 ---
 st.set_page_config(page_title="ドル円AI短期予測 (5分足固定版)", layout="wide")
 
-# --- UI非表示 & 黒背景デザイン (CSS) ---
+# --- UI非表示デザイン (CSS) ---
+# 背景色と文字色の強制指定を削除しました。
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -25,37 +26,11 @@ st.markdown("""
     div[data-testid="stToolbar"] {visibility: hidden;}
     .stDeployButton {display:none;}
     
-    .stApp {
-        background-color: #000000;
-        color: #ffffff;
-    }
-    h1, h2, h3, h4, h5, h6, p, div, span, label, li, .stMarkdown {
-        color: #ffffff !important;
-        font-family: sans-serif;
-    }
-    .stTextInput > div > div > input {
-        color: #ffffff !important;
-        background-color: #333333;
-        font-weight: bold;
-    }
-    .stRadio > div {
-        background-color: #333333;
-        padding: 10px;
-        border-radius: 10px;
-        color: #ffffff;
-    }
-    .stSlider > div > div > div > div {
-        color: #00cc96 !important;
-    }
     .block-container {
         padding-top: 2rem;
         padding-bottom: 5rem;
         padding-left: 0.5rem;
         padding-right: 0.5rem;
-    }
-    /* Plotlyの背景を強制的に黒にする */
-    .js-plotly-plot .plotly .main-svg {
-        background-color: #000000 !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -367,7 +342,7 @@ try:
 
     st.write(f"**現在値 (5分足): {current_price:,.2f} 円**")
     trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
-    st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True)
+    st.write(f"<span style='font-size:0.9rem; color:#888'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True) # 文字色を少し明るく調整
 
     # 過去分析
     st.markdown("#### **📉 直近のAI判断 (過去の答え合わせ)**")
@@ -408,20 +383,21 @@ try:
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
         text=[f"{p:.1f}%" for p in probs_up], textposition='auto',
-        textfont=dict(size=20, color='white', family="Arial Black")
+        # textfont=dict(size=20, color='white', family="Arial Black") # Plotlyのデフォルトに任せる
     ))
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_down, name='下落確率', marker_color='#ff4b4b',
         text=[f"{p:.1f}%" for p in probs_down], textposition='auto',
-        textfont=dict(size=20, color='white', family="Arial Black")
+        # textfont=dict(size=20, color='white', family="Arial Black") # Plotlyのデフォルトに任せる
     ))
     fig_bar.update_layout(
-        template="plotly_dark", height=300, 
+        # template="plotly_dark", # テンプレート指定を削除
+        height=300, 
         margin=dict(l=0, r=0, t=30, b=20), barmode='group',
-        paper_bgcolor='#000000', plot_bgcolor='#000000',
-        yaxis=dict(range=[0, 105], showgrid=True, gridcolor='#444444', title="確率 (%)"),
-        xaxis=dict(showgrid=False, color='white'),
-        font=dict(color='white')
+        # paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景色指定を削除
+        yaxis=dict(range=[0, 105], showgrid=True, title="確率 (%)"),
+        xaxis=dict(showgrid=False),
+        # font=dict(color='white') # フォント色指定を削除
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -445,11 +421,12 @@ try:
     x_max = forecast['ds'].max()
     x_min = df_fixed['ds'].min()
     fig_chart.update_layout(
-        template="plotly_dark", height=500, 
-        paper_bgcolor='#000000', plot_bgcolor='#000000',
-        font=dict(color='white'),
-        xaxis=dict(range=[x_min, x_max], showgrid=True, gridcolor='#444444', linecolor='#ffffff'), 
-        yaxis=dict(fixedrange=False, showgrid=True, gridcolor='#444444', linecolor='#ffffff')
+        # template="plotly_dark", # テンプレート指定を削除
+        height=500, 
+        # paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景色指定を削除
+        # font=dict(color='white'), # フォント色指定を削除
+        xaxis=dict(range=[x_min, x_max], showgrid=True), 
+        yaxis=dict(fixedrange=False, showgrid=True)
     )
     st.plotly_chart(fig_chart, use_container_width=True)
 
@@ -511,16 +488,17 @@ try:
         )
         
         fig_pnl.update_layout(
-            template="plotly_dark", height=400, margin=dict(l=0, r=0, t=30, b=20), 
-            paper_bgcolor='#000000', plot_bgcolor='#000000',
-            font=dict(color='white'),
-            xaxis=dict(title="決済日時", type='category', showgrid=True, gridcolor='#444444'),
+            # template="plotly_dark", # テンプレート指定を削除
+            height=400, margin=dict(l=0, r=0, t=30, b=20), 
+            # paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景色指定を削除
+            # font=dict(color='white'), # フォント色指定を削除
+            xaxis=dict(title="決済日時", type='category', showgrid=True),
             showlegend=True,
             legend=dict(orientation="h", y=1.1)
         )
         
         # 軸の設定
-        fig_pnl.update_yaxes(title_text="AI確度 (%)", range=[50, 105], showgrid=True, gridcolor='#444444', secondary_y=False)
+        fig_pnl.update_yaxes(title_text="AI確度 (%)", range=[50, 105], showgrid=True, secondary_y=False)
         fig_pnl.update_yaxes(title_text="累積 pips", showgrid=False, secondary_y=True)
 
         st.plotly_chart(fig_pnl, use_container_width=True)
