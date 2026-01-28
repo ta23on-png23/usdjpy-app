@@ -24,14 +24,16 @@ st.markdown("""
     div[data-testid="stToolbar"] {visibility: hidden;}
     .stDeployButton {display:none;}
     
+    /* アプリ全体の背景を黒、文字を白に */
     .stApp {
         background-color: #000000;
         color: #ffffff;
     }
-    h1, h2, h3, h4, h5, h6, p, div, span, label, li, .stMarkdown {
+    h1, h2, h3, h4, h5, h6, p, div, span, label, li, .stMarkdown, .stText {
         color: #ffffff !important;
         font-family: sans-serif;
     }
+    /* 入力フォーム周り */
     .stTextInput > div > div > input {
         color: #ffffff !important;
         background-color: #333333;
@@ -52,13 +54,9 @@ st.markdown("""
         padding-left: 0.5rem;
         padding-right: 0.5rem;
     }
-    /* Plotlyの背景を強制的に黒にする */
+    /* Plotlyの背景強制黒 */
     .js-plotly-plot .plotly .main-svg {
         background-color: #000000 !important;
-    }
-    /* アラートの文字色調整 */
-    .stAlert {
-        color: #000000;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -96,7 +94,6 @@ def to_float(x):
 def get_realtime_data():
     try:
         ticker = yf.Ticker("USDJPY=X")
-        # 直近1日分の1分足を取得
         df_now = ticker.history(period="1d", interval="1m")
         if not df_now.empty:
             df_now.index = df_now.index.tz_convert('Asia/Tokyo')
@@ -112,7 +109,6 @@ def get_forex_data_robust():
     tickers_to_try = ["USDJPY=X", "JPY=X"]
     for ticker in tickers_to_try:
         try:
-            # 5分足を直近5日分取得
             temp_df = yf.download(ticker, period="5d", interval="5m", progress=False)
             if not temp_df.empty and len(temp_df) > 20:
                 return temp_df
@@ -178,11 +174,7 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
 
 # --- バックテスト機能 ---
 def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_window, threshold):
-    """
-    過去72時間分のデータでテスト。
-    """
     df_merged = pd.merge(df_fixed, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], on='ds', how='inner')
-    
     cutoff_date = df_merged['ds'].max() - timedelta(hours=72)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
     
@@ -199,11 +191,10 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
         l_price = to_float(row['Low'])
         c_price = to_float(row['Close'])
         
-        # --- 1. 決済判定 ---
+        # 決済判定
         if active_trade is not None:
             outcome = None
             pnl = 0.0
-            
             hit_tp = False
             hit_sl = False
             
@@ -238,7 +229,7 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                 active_trade = None 
                 continue 
         
-        # --- 2. 新規エントリー判定 ---
+        # エントリー判定
         if active_trade is None:
             if 2 <= current_hour < 9:
                 continue
@@ -268,21 +259,9 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                 sl_dist = 0.15 
                 
                 if action == "BUY":
-                    active_trade = {
-                        'type': 'BUY',
-                        'entry_price': entry_price,
-                        'tp': entry_price + tp_dist,
-                        'sl': entry_price - sl_dist,
-                        'start_time': current_time
-                    }
+                    active_trade = {'type': 'BUY', 'entry_price': entry_price, 'tp': entry_price + tp_dist, 'sl': entry_price - sl_dist, 'start_time': current_time}
                 else:
-                    active_trade = {
-                        'type': 'SELL',
-                        'entry_price': entry_price,
-                        'tp': entry_price - tp_dist,
-                        'sl': entry_price + sl_dist,
-                        'start_time': current_time
-                    }
+                    active_trade = {'type': 'SELL', 'entry_price': entry_price, 'tp': entry_price - tp_dist, 'sl': entry_price + sl_dist, 'start_time': current_time}
                     
     return pd.DataFrame(results)
 
@@ -295,21 +274,17 @@ api_interval = "5m"
 api_period = "5d" 
 min_width_setting = 0.03
 trend_window = 100 
-
-# ★ 時間設定を 5, 10, 15 に変更
 future_configs = [(5, "5分後"), (10, "10分後"), (15, "15分後")]
 past_configs = [(5, "5分前"), (10, "10分前"), (15, "15分前")]
 
-# === ★ ラジオボタンによる閾値選択 ===
+# === 閾値設定 (ラジオボタン) ===
 entry_threshold = st.radio(
     "エントリー判定閾値 (%)",
     [70, 75, 80],
-    index=1, # デフォルト75%
+    index=1,
     horizontal=True,
     help="AIの確信度がこの数値以上の場合のみエントリーします。"
 )
-
-# ★ 注意書き
 st.warning("※注意：設定を変更すると基準の時間が最新に変わります")
 
 try:
@@ -317,10 +292,10 @@ try:
         df = get_forex_data_robust()
 
     if df.empty:
-        st.error("データが取得できませんでした。時間をおいて再接続してください。")
+        st.error("データが取得できませんでした。")
         st.stop()
 
-    # --- データ整形 ---
+    # データ整形
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -333,12 +308,9 @@ try:
         elif 'high' in cl: cols_map[c] = 'High'
         elif 'low' in cl: cols_map[c] = 'Low'
         elif 'close' in cl: cols_map[c] = 'Close'
-    
     df = df.rename(columns=cols_map)
-    try:
-        df['ds'] = pd.to_datetime(df['ds']).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
-    except:
-        df['ds'] = pd.to_datetime(df['ds'])
+    try: df['ds'] = pd.to_datetime(df['ds']).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
+    except: df['ds'] = pd.to_datetime(df['ds'])
 
     # テクニカル計算
     df['SMA20'] = df['Close'].rolling(window=20).mean()
@@ -347,11 +319,11 @@ try:
     df['BB_Lower'] = df['SMA20'] - (df['STD'] * 2)
     df['Trend_SMA'] = df['Close'].rolling(window=trend_window).mean()
 
-    # --- データ固定化 ---
+    # 固定データ作成
     df['y'] = df['Close'] 
     df_fixed = df.iloc[:-1].copy() 
 
-    # --- Prophet学習 ---
+    # Prophet学習
     m = Prophet(changepoint_prior_scale=0.15, daily_seasonality=False, weekly_seasonality=True, yearly_seasonality=False)
     m.add_seasonality(name='hourly', period=1/24, fourier_order=5)
     m.fit(df_fixed) 
@@ -359,7 +331,7 @@ try:
     future = m.make_future_dataframe(periods=40, freq='5min')
     forecast = m.predict(future)
 
-    # --- 現在値表示 ---
+    # 現在値
     realtime_price, realtime_time, df_recent_1m = get_realtime_data()
     last_fixed_price = to_float(df_fixed['Close'].iloc[-1])
     last_fixed_date = df_fixed['ds'].iloc[-1]
@@ -382,19 +354,17 @@ try:
     trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
     st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True)
 
-    # --- 過去データ分析 (5, 10, 15分前) ---
+    # 過去分析
     st.markdown("#### **📉 直近のAI判断 (過去の答え合わせ)**")
     past_data_list = []
-    
     for val, label_text in past_configs:
         target_time = last_fixed_date - timedelta(minutes=val)
         past_actual_price = None
         try:
             row_past = df_fixed.iloc[(df_fixed['ds'] - target_time).abs().argsort()[:1]].iloc[0]
-            if abs((row_past['ds'] - target_time).total_seconds()) < 600:
-                past_actual_price = to_float(row_past['Close'])
+            if abs((row_past['ds'] - target_time).total_seconds()) < 600: past_actual_price = to_float(row_past['Close'])
         except: pass
-
+        
         row_fc = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
         past_pred = to_float(row_fc['yhat'])
         
@@ -404,16 +374,11 @@ try:
             past_data_list.append({"時間": label_text, "当時のレート": f"{past_actual_price:.2f} 円", "AIトレンド判定": f"上 {p_up:.0f}% / 下 {p_down:.0f}%", "乖離状況": note})
         else:
              past_data_list.append({"時間": label_text, "当時のレート": "-", "AIトレンド判定": "-", "乖離状況": "-"})
-
     st.dataframe(pd.DataFrame(past_data_list), hide_index=True, use_container_width=True)
 
-    # --- 未来予測 (5, 10, 15分後) ---
+    # 未来予測
     st.markdown("#### **📈 短期予測 (上昇 vs 下落)**")
-    
-    probs_up = []
-    probs_down = []
-    labels = []
-    
+    probs_up, probs_down, labels = [], [], []
     for val, label_text in future_configs:
         t_time = last_fixed_date + timedelta(minutes=val)
         r = forecast.iloc[(forecast['ds'] - t_time).abs().argsort()[:1]].iloc[0]
@@ -423,7 +388,7 @@ try:
         probs_down.append(100.0 - p_up)
         labels.append(label_text)
 
-    # 棒グラフ
+    # 棒グラフ (修正: 背景黒・文字白・グリッド線あり)
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
@@ -438,10 +403,10 @@ try:
     fig_bar.update_layout(
         template="plotly_dark", height=300, 
         margin=dict(l=0, r=0, t=30, b=20), barmode='group',
-        plot_bgcolor='#000000', paper_bgcolor='#000000',
-        yaxis=dict(range=[0, 105], showgrid=True, gridcolor='#333333'),
-        xaxis=dict(showgrid=False),
-        font=dict(color='white')
+        paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景黒
+        font=dict(color='white'), # 全体の文字色を白に
+        yaxis=dict(range=[0, 105], showgrid=True, gridcolor='#444444', title="確率 (%)"), # グリッド線を表示
+        xaxis=dict(showgrid=False, color='white')
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -450,14 +415,16 @@ try:
     detail_data = {"時間": labels, "上昇確率": [f"{p:.1f} %" for p in probs_up], "下落確率": [f"{p:.1f} %" for p in probs_down]}
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- チャート表示 ---
+    # チャート表示 (修正: 背景黒・文字白・グリッド線あり)
     st.markdown("#### **推移・AI軌道**")
     fig_chart = go.Figure()
     
+    # BB (濃い紫で表示)
     fig_chart.add_trace(go.Scatter(x=df_fixed['ds'], y=df_fixed['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
     fig_chart.add_trace(go.Scatter(
         x=df_fixed['ds'], y=df_fixed['BB_Lower'], mode='lines', line=dict(width=0),
-        fill='tonexty', fillcolor='rgba(138, 43, 226, 0.3)', name='BB(±2σ)', hoverinfo='skip'
+        fill='tonexty', fillcolor='rgba(180, 80, 255, 0.25)', # 明るめの紫で視認性アップ
+        name='BB(±2σ)', hoverinfo='skip'
     ))
 
     fig_chart.add_trace(go.Candlestick(x=df_fixed['ds'], open=df_fixed['Open'], high=df_fixed['High'], low=df_fixed['Low'], close=df_fixed['Close'], name='実測(確定足)'))
@@ -469,14 +436,14 @@ try:
     
     fig_chart.update_layout(
         template="plotly_dark", height=500, 
-        xaxis=dict(range=[x_min, x_max], showgrid=True, gridcolor='#333333', linecolor='#555555'), 
-        yaxis=dict(fixedrange=False, showgrid=True, gridcolor='#333333', linecolor='#555555'),
-        plot_bgcolor='#000000', paper_bgcolor='#000000',
-        font=dict(color='white')
+        paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景黒
+        font=dict(color='white'), # 文字白
+        xaxis=dict(range=[x_min, x_max], showgrid=True, gridcolor='#444444', linecolor='#ffffff'), 
+        yaxis=dict(fixedrange=False, showgrid=True, gridcolor='#444444', linecolor='#ffffff')
     )
     st.plotly_chart(fig_chart, use_container_width=True)
 
-    # --- バックテスト結果表示 ---
+    # バックテスト結果
     st.markdown("---")
     st.markdown("### 🔙 **過去72時間のバックテスト (保有継続・時間フィルター版)**")
     
@@ -512,10 +479,10 @@ try:
         
         fig_pnl.update_layout(
             template="plotly_dark", height=400, margin=dict(l=0, r=0, t=30, b=20), 
-            xaxis=dict(title="決済日時", type='category', showgrid=True, gridcolor='#333333'),
-            yaxis=dict(showgrid=True, gridcolor='#333333'),
-            plot_bgcolor='#000000', paper_bgcolor='#000000',
-            font=dict(color='white')
+            paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景黒
+            font=dict(color='white'),
+            xaxis=dict(title="決済日時", type='category', showgrid=True, gridcolor='#444444'),
+            yaxis=dict(showgrid=True, gridcolor='#444444')
         )
         st.plotly_chart(fig_pnl, use_container_width=True)
         st.dataframe(bt_results, hide_index=True, use_container_width=True)
