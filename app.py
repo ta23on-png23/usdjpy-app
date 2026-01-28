@@ -51,10 +51,6 @@ st.markdown("""
         padding-left: 0.5rem;
         padding-right: 0.5rem;
     }
-    /* Plotlyの背景を強制的に黒にする */
-    .js-plotly-plot .plotly .main-svg {
-        background-color: #000000 !important;
-    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -220,15 +216,13 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                 pnl = 15.0
             
             if outcome:
-                # 決済価格の決定
                 exit_price = active_trade['tp'] if outcome == "WIN" else active_trade['sl']
-                
                 results.append({
                     "エントリー": active_trade['start_time'].strftime('%m/%d %H:%M'),
                     "決済日時": current_time.strftime('%m/%d %H:%M'),
                     "売買": active_trade['type'],
-                    "Entry": f"{active_trade['entry_price']:.2f}", # ★エントリー価格
-                    "Exit": f"{exit_price:.2f}",                   # ★決済価格
+                    "Entry": f"{active_trade['entry_price']:.2f}",
+                    "Exit": f"{exit_price:.2f}",
                     "結果": outcome,
                     "P/L(pips)": pnl
                 })
@@ -241,7 +235,6 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                 continue
 
             pred = to_float(row['yhat'])
-            
             current_trend_sma = to_float(row['Trend_SMA']) if 'Trend_SMA' in row else c_price
             trend_dir = 0
             if c_price > current_trend_sma: trend_dir = 1
@@ -329,7 +322,6 @@ try:
         elif 'close' in cl: cols_map[c] = 'Close'
     
     df = df.rename(columns=cols_map)
-    
     try:
         df['ds'] = pd.to_datetime(df['ds']).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
     except:
@@ -347,12 +339,7 @@ try:
     df_fixed = df.iloc[:-1].copy() 
 
     # --- Prophet学習 ---
-    m = Prophet(
-        changepoint_prior_scale=0.15, 
-        daily_seasonality=False,
-        weekly_seasonality=True, 
-        yearly_seasonality=False
-    )
+    m = Prophet(changepoint_prior_scale=0.15, daily_seasonality=False, weekly_seasonality=True, yearly_seasonality=False)
     m.add_seasonality(name='hourly', period=1/24, fourier_order=5)
     m.fit(df_fixed) 
     
@@ -393,8 +380,7 @@ try:
             row_past = df_fixed.iloc[(df_fixed['ds'] - target_time).abs().argsort()[:1]].iloc[0]
             if abs((row_past['ds'] - target_time).total_seconds()) < 600:
                 past_actual_price = to_float(row_past['Close'])
-        except:
-            pass
+        except: pass
 
         row_fc = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
         past_pred = to_float(row_fc['yhat'])
@@ -424,20 +410,25 @@ try:
         probs_down.append(100.0 - p_up)
         labels.append(label_text)
 
+    # --- 棒グラフ (修正: 数値を大きく表示、背景黒) ---
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
         text=[f"{p:.1f}%" for p in probs_up], textposition='auto',
-        textfont=dict(size=24, color='white', family="Arial Black")
+        textfont=dict(size=20, color='white', family="Arial Black")
     ))
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_down, name='下落確率', marker_color='#ff4b4b',
         text=[f"{p:.1f}%" for p in probs_down], textposition='auto',
-        textfont=dict(size=24, color='white', family="Arial Black")
+        textfont=dict(size=20, color='white', family="Arial Black")
     ))
     fig_bar.update_layout(
-        template="plotly_dark", height=300, margin=dict(l=0, r=0, t=30, b=20), barmode='group',
-        yaxis=dict(range=[0, 105])
+        template="plotly_dark", height=300, 
+        margin=dict(l=0, r=0, t=30, b=20), barmode='group',
+        plot_bgcolor='#000000', paper_bgcolor='#000000',
+        yaxis=dict(range=[0, 105], showgrid=True, gridcolor='#333333'),
+        xaxis=dict(showgrid=False),
+        font=dict(color='white')
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -446,16 +437,15 @@ try:
     detail_data = {"時間": labels, "上昇確率": [f"{p:.1f} %" for p in probs_up], "下落確率": [f"{p:.1f} %" for p in probs_down]}
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- チャート表示 ---
+    # --- チャート表示 (修正: 背景黒、グリッド、BB可視化) ---
     st.markdown("#### **推移・AI軌道**")
     fig_chart = go.Figure()
     
+    # BB (透明度調整)
     fig_chart.add_trace(go.Scatter(x=df_fixed['ds'], y=df_fixed['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
     fig_chart.add_trace(go.Scatter(
         x=df_fixed['ds'], y=df_fixed['BB_Lower'], mode='lines', line=dict(width=0),
-        fill='tonexty', 
-        fillcolor='rgba(138, 43, 226, 0.4)', 
-        name='BB(±2σ)', hoverinfo='skip'
+        fill='tonexty', fillcolor='rgba(138, 43, 226, 0.3)', name='BB(±2σ)', hoverinfo='skip'
     ))
 
     fig_chart.add_trace(go.Candlestick(x=df_fixed['ds'], open=df_fixed['Open'], high=df_fixed['High'], low=df_fixed['Low'], close=df_fixed['Close'], name='実測(確定足)'))
@@ -467,9 +457,10 @@ try:
     
     fig_chart.update_layout(
         template="plotly_dark", height=500, 
-        xaxis=dict(range=[x_min, x_max], gridcolor='rgba(128,128,128,0.2)'), 
-        yaxis=dict(fixedrange=False, gridcolor='rgba(128,128,128,0.2)'),
-        plot_bgcolor='#000000', paper_bgcolor='#000000'
+        xaxis=dict(range=[x_min, x_max], showgrid=True, gridcolor='#333333', linecolor='#555555'), 
+        yaxis=dict(fixedrange=False, showgrid=True, gridcolor='#333333', linecolor='#555555'),
+        plot_bgcolor='#000000', paper_bgcolor='#000000',
+        font=dict(color='white')
     )
     st.plotly_chart(fig_chart, use_container_width=True)
 
@@ -481,8 +472,7 @@ try:
     <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
     ルール: AIの方向確率が <b>{entry_threshold}%</b> を超えた時点でエントリー。ポジションは常に1つ。<br>
     ±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。<br>
-    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span><br>
-    ※データは確定足のみを使用しているため、リロードしても結果は固定されます。
+    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span>
     </div>
     """, unsafe_allow_html=True)
     
@@ -510,8 +500,10 @@ try:
         
         fig_pnl.update_layout(
             template="plotly_dark", height=400, margin=dict(l=0, r=0, t=30, b=20), 
-            xaxis=dict(title="決済日時", type='category'),
-            plot_bgcolor='#000000', paper_bgcolor='#000000'
+            xaxis=dict(title="決済日時", type='category', showgrid=True, gridcolor='#333333'),
+            yaxis=dict(showgrid=True, gridcolor='#333333'),
+            plot_bgcolor='#000000', paper_bgcolor='#000000',
+            font=dict(color='white')
         )
         st.plotly_chart(fig_pnl, use_container_width=True)
         st.dataframe(bt_results, hide_index=True, use_container_width=True)
