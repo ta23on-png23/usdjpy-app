@@ -16,6 +16,7 @@ DEMO_PASSWORD = "demo"
 st.set_page_config(page_title="ドル円AI短期予測 (5分足固定版)", layout="wide")
 
 # --- UI非表示 & 黒背景デザイン (CSS) ---
+# ★修正: グラフを塗りつぶすCSSを削除し、アプリ全体の背景のみ設定
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -33,7 +34,6 @@ st.markdown("""
         color: #ffffff !important;
         font-family: sans-serif;
     }
-    /* 入力フォーム周り */
     .stTextInput > div > div > input {
         color: #ffffff !important;
         background-color: #333333;
@@ -53,10 +53,6 @@ st.markdown("""
         padding-bottom: 5rem;
         padding-left: 0.5rem;
         padding-right: 0.5rem;
-    }
-    /* Plotlyの背景強制黒 */
-    .js-plotly-plot .plotly .main-svg {
-        background-color: #000000 !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -191,7 +187,6 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
         l_price = to_float(row['Low'])
         c_price = to_float(row['Close'])
         
-        # 決済判定
         if active_trade is not None:
             outcome = None
             pnl = 0.0
@@ -229,7 +224,6 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                 active_trade = None 
                 continue 
         
-        # エントリー判定
         if active_trade is None:
             if 2 <= current_hour < 9:
                 continue
@@ -295,7 +289,6 @@ try:
         st.error("データが取得できませんでした。")
         st.stop()
 
-    # データ整形
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -319,7 +312,7 @@ try:
     df['BB_Lower'] = df['SMA20'] - (df['STD'] * 2)
     df['Trend_SMA'] = df['Close'].rolling(window=trend_window).mean()
 
-    # 固定データ作成
+    # データ固定化
     df['y'] = df['Close'] 
     df_fixed = df.iloc[:-1].copy() 
 
@@ -388,7 +381,7 @@ try:
         probs_down.append(100.0 - p_up)
         labels.append(label_text)
 
-    # 棒グラフ (修正: 背景黒・文字白・グリッド線あり)
+    # 棒グラフ (template='plotly_dark'を使用)
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
@@ -401,12 +394,11 @@ try:
         textfont=dict(size=20, color='white', family="Arial Black")
     ))
     fig_bar.update_layout(
-        template="plotly_dark", height=300, 
+        template="plotly_dark", # ★純正ダークテーマを適用
+        height=300, 
         margin=dict(l=0, r=0, t=30, b=20), barmode='group',
-        paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景黒
-        font=dict(color='white'), # 全体の文字色を白に
-        yaxis=dict(range=[0, 105], showgrid=True, gridcolor='#444444', title="確率 (%)"), # グリッド線を表示
-        xaxis=dict(showgrid=False, color='white')
+        paper_bgcolor='#000000', plot_bgcolor='#000000',
+        yaxis=dict(range=[0, 105], title="確率 (%)"),
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -415,16 +407,15 @@ try:
     detail_data = {"時間": labels, "上昇確率": [f"{p:.1f} %" for p in probs_up], "下落確率": [f"{p:.1f} %" for p in probs_down]}
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # チャート表示 (修正: 背景黒・文字白・グリッド線あり)
+    # チャート表示
     st.markdown("#### **推移・AI軌道**")
     fig_chart = go.Figure()
     
-    # BB (濃い紫で表示)
+    # BB
     fig_chart.add_trace(go.Scatter(x=df_fixed['ds'], y=df_fixed['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
     fig_chart.add_trace(go.Scatter(
         x=df_fixed['ds'], y=df_fixed['BB_Lower'], mode='lines', line=dict(width=0),
-        fill='tonexty', fillcolor='rgba(180, 80, 255, 0.25)', # 明るめの紫で視認性アップ
-        name='BB(±2σ)', hoverinfo='skip'
+        fill='tonexty', fillcolor='rgba(180, 80, 255, 0.25)', name='BB(±2σ)', hoverinfo='skip'
     ))
 
     fig_chart.add_trace(go.Candlestick(x=df_fixed['ds'], open=df_fixed['Open'], high=df_fixed['High'], low=df_fixed['Low'], close=df_fixed['Close'], name='実測(確定足)'))
@@ -435,11 +426,11 @@ try:
     x_min = df_fixed['ds'].min()
     
     fig_chart.update_layout(
-        template="plotly_dark", height=500, 
-        paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景黒
-        font=dict(color='white'), # 文字白
-        xaxis=dict(range=[x_min, x_max], showgrid=True, gridcolor='#444444', linecolor='#ffffff'), 
-        yaxis=dict(fixedrange=False, showgrid=True, gridcolor='#444444', linecolor='#ffffff')
+        template="plotly_dark", # ★純正ダークテーマを適用
+        height=500, 
+        paper_bgcolor='#000000', plot_bgcolor='#000000',
+        xaxis=dict(range=[x_min, x_max]), 
+        yaxis=dict(fixedrange=False)
     )
     st.plotly_chart(fig_chart, use_container_width=True)
 
@@ -478,11 +469,10 @@ try:
         fig_pnl.add_trace(go.Scatter(x=bt_results['決済日時'], y=bt_results['Cumulative_PL'], mode='lines+markers', name='累積損益', line=dict(color='yellow', width=3)))
         
         fig_pnl.update_layout(
-            template="plotly_dark", height=400, margin=dict(l=0, r=0, t=30, b=20), 
-            paper_bgcolor='#000000', plot_bgcolor='#000000', # 背景黒
-            font=dict(color='white'),
-            xaxis=dict(title="決済日時", type='category', showgrid=True, gridcolor='#444444'),
-            yaxis=dict(showgrid=True, gridcolor='#444444')
+            template="plotly_dark", # ★純正ダークテーマを適用
+            height=400, margin=dict(l=0, r=0, t=30, b=20), 
+            paper_bgcolor='#000000', plot_bgcolor='#000000',
+            xaxis=dict(title="決済日時", type='category')
         )
         st.plotly_chart(fig_pnl, use_container_width=True)
         st.dataframe(bt_results, hide_index=True, use_container_width=True)
