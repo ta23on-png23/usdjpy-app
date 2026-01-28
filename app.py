@@ -51,6 +51,10 @@ st.markdown("""
         padding-left: 0.5rem;
         padding-right: 0.5rem;
     }
+    /* Plotlyの背景を強制的に黒にする */
+    .js-plotly-plot .plotly .main-svg {
+        background-color: #000000 !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -172,7 +176,6 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
     """
     過去72時間分のデータでテスト。
     """
-    # 日付(ds)でマージ
     df_merged = pd.merge(df_fixed, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], on='ds', how='inner')
     
     cutoff_date = df_merged['ds'].max() - timedelta(hours=72)
@@ -186,7 +189,6 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
         current_time = row['ds']
         current_hour = current_time.hour 
         
-        # Open, High, Low, Closeを取得
         o_price = to_float(row['Open'])
         h_price = to_float(row['High'])
         l_price = to_float(row['Low'])
@@ -218,11 +220,15 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
                 pnl = 15.0
             
             if outcome:
+                # 決済価格の決定
+                exit_price = active_trade['tp'] if outcome == "WIN" else active_trade['sl']
+                
                 results.append({
                     "エントリー": active_trade['start_time'].strftime('%m/%d %H:%M'),
                     "決済日時": current_time.strftime('%m/%d %H:%M'),
                     "売買": active_trade['type'],
-                    "価格": active_trade['entry_price'],
+                    "Entry": f"{active_trade['entry_price']:.2f}", # ★エントリー価格
+                    "Exit": f"{exit_price:.2f}",                   # ★決済価格
                     "結果": outcome,
                     "P/L(pips)": pnl
                 })
@@ -231,7 +237,6 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
         
         # --- 2. 新規エントリー判定 ---
         if active_trade is None:
-            # 時間フィルター: 2時〜8時はエントリーしない
             if 2 <= current_hour < 9:
                 continue
 
@@ -337,9 +342,9 @@ try:
     df['BB_Lower'] = df['SMA20'] - (df['STD'] * 2)
     df['Trend_SMA'] = df['Close'].rolling(window=trend_window).mean()
 
-    # --- データ固定化 (バックテスト & AI学習用) ---
+    # --- データ固定化 ---
     df['y'] = df['Close'] 
-    df_fixed = df.iloc[:-1].copy() # 確定足のみ
+    df_fixed = df.iloc[:-1].copy() 
 
     # --- Prophet学習 ---
     m = Prophet(
@@ -419,7 +424,6 @@ try:
         probs_down.append(100.0 - p_up)
         labels.append(label_text)
 
-    # 棒グラフ (数値表示・白文字・大きく)
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
@@ -433,7 +437,7 @@ try:
     ))
     fig_bar.update_layout(
         template="plotly_dark", height=300, margin=dict(l=0, r=0, t=30, b=20), barmode='group',
-        yaxis=dict(range=[0, 105]) # 数値が見切れないように少し余裕を持たせる
+        yaxis=dict(range=[0, 105])
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -446,12 +450,11 @@ try:
     st.markdown("#### **推移・AI軌道**")
     fig_chart = go.Figure()
     
-    # ボリンジャーバンド (透明度を上げて黒背景でも見えるように)
     fig_chart.add_trace(go.Scatter(x=df_fixed['ds'], y=df_fixed['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
     fig_chart.add_trace(go.Scatter(
         x=df_fixed['ds'], y=df_fixed['BB_Lower'], mode='lines', line=dict(width=0),
         fill='tonexty', 
-        fillcolor='rgba(138, 43, 226, 0.4)', # 0.2 -> 0.4 に濃くした
+        fillcolor='rgba(138, 43, 226, 0.4)', 
         name='BB(±2σ)', hoverinfo='skip'
     ))
 
@@ -478,7 +481,8 @@ try:
     <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
     ルール: AIの方向確率が <b>{entry_threshold}%</b> を超えた時点でエントリー。ポジションは常に1つ。<br>
     ±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。<br>
-    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span>
+    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span><br>
+    ※データは確定足のみを使用しているため、リロードしても結果は固定されます。
     </div>
     """, unsafe_allow_html=True)
     
