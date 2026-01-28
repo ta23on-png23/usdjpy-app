@@ -41,6 +41,7 @@ st.markdown("""
         background-color: #333333;
         padding: 10px;
         border-radius: 10px;
+        color: #ffffff;
     }
     .stSlider > div > div > div > div {
         color: #00cc96 !important;
@@ -50,6 +51,14 @@ st.markdown("""
         padding-bottom: 5rem;
         padding-left: 0.5rem;
         padding-right: 0.5rem;
+    }
+    /* Plotlyの背景を強制的に黒にする */
+    .js-plotly-plot .plotly .main-svg {
+        background-color: #000000 !important;
+    }
+    /* アラートの文字色調整 */
+    .stAlert {
+        color: #000000;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -286,18 +295,22 @@ api_interval = "5m"
 api_period = "5d" 
 min_width_setting = 0.03
 trend_window = 100 
-future_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後")]
-past_configs = [(5, "5分前"), (15, "15分前"), (30, "30分前"), (60, "1H前")]
 
-# === 閾値スライダー ===
-entry_threshold = st.slider(
-    "エントリー判定閾値 (%)", 
-    min_value=70, 
-    max_value=95, 
-    value=80, 
-    step=5,
+# ★ 時間設定を 5, 10, 15 に変更
+future_configs = [(5, "5分後"), (10, "10分後"), (15, "15分後")]
+past_configs = [(5, "5分前"), (10, "10分前"), (15, "15分前")]
+
+# === ★ ラジオボタンによる閾値選択 ===
+entry_threshold = st.radio(
+    "エントリー判定閾値 (%)",
+    [70, 75, 80],
+    index=1, # デフォルト75%
+    horizontal=True,
     help="AIの確信度がこの数値以上の場合のみエントリーします。"
 )
+
+# ★ 注意書き
+st.warning("※注意：設定を変更すると基準の時間が最新に変わります")
 
 try:
     with st.spinner('5分足データ取得中...'):
@@ -369,7 +382,7 @@ try:
     trend_text = "長期上昇トレンド中" if trend_dir == 1 else ("長期下落トレンド中" if trend_dir == -1 else "レンジ相場")
     st.write(f"<span style='font-size:0.9rem; color:#ddd'>{trend_text} (現在日時: {display_time})</span>", unsafe_allow_html=True)
 
-    # --- 過去データ分析 ---
+    # --- 過去データ分析 (5, 10, 15分前) ---
     st.markdown("#### **📉 直近のAI判断 (過去の答え合わせ)**")
     past_data_list = []
     
@@ -394,7 +407,7 @@ try:
 
     st.dataframe(pd.DataFrame(past_data_list), hide_index=True, use_container_width=True)
 
-    # --- 未来予測 ---
+    # --- 未来予測 (5, 10, 15分後) ---
     st.markdown("#### **📈 短期予測 (上昇 vs 下落)**")
     
     probs_up = []
@@ -410,7 +423,7 @@ try:
         probs_down.append(100.0 - p_up)
         labels.append(label_text)
 
-    # --- 棒グラフ (修正: 数値を大きく表示、背景黒) ---
+    # 棒グラフ
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
         x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
@@ -437,11 +450,10 @@ try:
     detail_data = {"時間": labels, "上昇確率": [f"{p:.1f} %" for p in probs_up], "下落確率": [f"{p:.1f} %" for p in probs_down]}
     st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # --- チャート表示 (修正: 背景黒、グリッド、BB可視化) ---
+    # --- チャート表示 ---
     st.markdown("#### **推移・AI軌道**")
     fig_chart = go.Figure()
     
-    # BB (透明度調整)
     fig_chart.add_trace(go.Scatter(x=df_fixed['ds'], y=df_fixed['BB_Upper'], mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
     fig_chart.add_trace(go.Scatter(
         x=df_fixed['ds'], y=df_fixed['BB_Lower'], mode='lines', line=dict(width=0),
