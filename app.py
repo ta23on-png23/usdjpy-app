@@ -425,4 +425,168 @@ try:
         try:
             row_past = df_p.iloc[(df_p['ds'] - target_time).abs().argsort()[:1]].iloc[0]
             if abs((row_past['ds'] - target_time).total_seconds()) < 600:
-                past_actual_price = to_float(row_past['y
+                past_actual_price = to_float(row_past['y'])
+        except:
+            pass
+
+        # 2. その時点の「AI予測値(yhat)」を探す
+        row_fc = forecast.iloc[(forecast['ds'] - target_time).abs().argsort()[:1]].iloc[0]
+        past_pred = to_float(row_fc['yhat'])
+        
+        if past_actual_price is not None:
+            p_up, note = calculate_reversion_probability(
+                past_actual_price, past_pred, 
+                to_float(row_fc['yhat_lower']), 
+                to_float(row_fc['yhat_upper']),
+                min_width=min_width_setting,
+                trend_direction=trend_dir 
+            )
+            p_down = 100.0 - p_up
+            
+            past_data_list.append({
+                "時間": label_text,
+                "当時のレート": f"{past_actual_price:.2f} 円",
+                "AIトレンド判定": f"上 {p_up:.0f}% / 下 {p_down:.0f}%",
+                "乖離状況": note
+            })
+        else:
+             past_data_list.append({"時間": label_text, "当時のレート": "-", "AIトレンド判定": "-", "乖離状況": "-"})
+
+    st.dataframe(pd.DataFrame(past_data_list), hide_index=True, use_container_width=True)
+
+    # =========================================
+    #  未来予測 & 通知
+    # =========================================
+    st.markdown("#### **📈 短期予測 (通知判定)**")
+    
+    probs_up = []
+    probs_down = []
+    labels = []
+    
+    # 5分後予測 (現在値 vs 次の確定足の予測値)
+    # 起点は現在時刻ではなく「最後の確定足」の次の足
+    next_target_time = last_fixed_date + timedelta(minutes=5)
+    row = forecast.iloc[(forecast['ds'] - next_target_time).abs().argsort()[:1]].iloc[0]
+    pred = to_float(row['yhat'])
+    
+    # 現在のリアルタイム価格を使って判定
+    prob_up, note = calculate_reversion_probability(
+        current_price, pred, 
+        to_float(row['yhat_lower']), to_float(row['yhat_upper']),
+        min_width=min_width_setting,
+        trend_direction=trend_dir 
+    )
+    
+    # 通知ロジック
+    alert_msg = ""
+    should_notify = False
+    notify_type = ""
+
+    if prob_up >= notify_threshold:
+        alert_msg = f"🔥 買いシグナル点灯！ 上昇確率 {prob_up:.1f}% (5分後予測)"
+        should_notify = True
+        notify_type = "BUY"
+    elif prob_up <= (100 - notify_threshold):
+        alert_msg = f"🧊 売りシグナル点灯！ 下落確率 {100-prob_up:.1f}% (5分後予測)"
+        should_notify = True
+        notify_type = "SELL"
+
+    if should_notify:
+        st.error(alert_msg) if notify_type == "SELL" else st.success(alert_msg)
+        
+        if "last_notify_time" not in st.session_state:
+            st.session_state.last_notify_time = None
+            st.session_state.last_notify_type = None
+        
+        is_new_signal = False
+        now_dt = datetime.now()
+        
+        if st.session_state.last_notify_time is None:
+            is_new_signal = True
+        else:
+            # 5分以上経過またはシグナル反転で通知
+            time_diff = (now_dt - st.session_state.last_notify_time).total_seconds() / 60
+            if time_diff >= 5 or st.session_state.last_notify_type != notify_type:
+                is_new_signal = True
+        
+        if is_new_signal:
+            line_msg = f"\n【USDJPY 5分足】\n{alert_msg}\n現在値: {current_price}円"
+            success = send_line_notification(line_msg)
+            if success:
+                st.toast("LINE通知を送信しました！", icon="📨")
+                st.session_state.last_notify_time = now_dt
+                st.session_state.last_notify_type = notify_type
+
+    # グラフ用データ作成
+    for val, label_text in future_configs:
+        t_time = last_fixed_date + timedelta(minutes=val)
+        r = forecast.iloc[(forecast['ds'] - t_time).abs().argsort()[:1]].iloc[0]
+        p = to_float(r['yhat'])
+        p_up, _ = calculate_reversion_probability(current_price, p, to_float(r['yhat_lower']), to_float(r['yhat_upper']), min_width=min_width_setting, trend_direction=trend_dir)
+        probs_up.append(p_up)
+        probs_down.append(100.0 - p_up)
+        labels.append(label_text)
+
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96'))
+    fig_bar.add_trace(go.Bar(x=labels, y=probs_down, name='下落確率', marker_color='#ff4b4b'))
+    fig_bar.update_layout(template="plotly_dark", height=250, margin=dict(l=0, r=0, t=30, b=20), barmode='group')
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # --- チャート表示 ---
+    st.markdown("#### **推移・AI軌道**")
+    fig_chart = go.Figure()
+    fig_chart.add_trace(go.Candlestick(x=df[date_c], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='実測'))
+    fig_chart.add_trace(go.Scatter(x=df[date_c], y=df['SMA20'], mode='lines', name='SMA20', line=dict(color='cyan', width=1)))
+    fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='AI軌道', line=dict(color='yellow', width=2)))
+    
+    x_max = forecast['ds'].max()
+    x_min = df[date_c].min()
+    y_min = current_price - 2.0
+    y_max = current_price + 2.0
+    
+    fig_chart.update_layout(template="plotly_dark", height=500, xaxis=dict(range=[x_min, x_max]), yaxis=dict(range=[y_min, y_max], fixedrange=False))
+    st.plotly_chart(fig_chart, use_container_width=True)
+
+    # --- バックテスト結果表示 ---
+    st.markdown("---")
+    st.markdown("### 🔙 **過去72時間のバックテスト (保有継続・時間フィルター版)**")
+    
+    st.markdown(f"""
+    <div style="font-size:0.8rem; color:#aaa; margin-bottom:10px;">
+    ルール: AIの方向確率が <b>{notify_threshold}%</b> を超えた時点でエントリー。ポジションは常に1つ。<br>
+    ±15pips(0.15円)に到達するまで、時間をまたいでポジションを保有し続けます。<br>
+    <span style="color:#ff4b4b;">※日本時間 02:00〜08:59 の間はエントリーしません。(決済は行われます)</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    bt_results = perform_backtest_persistent(df, forecast, min_width_setting, trend_window, notify_threshold)
+    
+    if not bt_results.empty:
+        total_trades = len(bt_results)
+        wins = len(bt_results[bt_results['結果'] == "WIN"])
+        losses = len(bt_results[bt_results['結果'] == "LOSS"])
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        total_pips = bt_results['P/L(pips)'].sum()
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("総取引回数", f"{total_trades} 回")
+        col2.metric("勝率", f"{win_rate:.1f} %")
+        col3.metric("合計獲得pips", f"{total_pips:+.1f} pips", delta_color="normal")
+        col4.metric("内訳", f"勝{wins} / 負{losses}")
+        
+        bt_results['Cumulative_PL'] = bt_results['P/L(pips)'].cumsum()
+        
+        fig_pnl = go.Figure()
+        bar_colors = ['#00cc96' if v > 0 else '#ff4b4b' for v in bt_results['P/L(pips)']]
+        fig_pnl.add_trace(go.Bar(x=bt_results['決済日時'], y=bt_results['P/L(pips)'], name='単独損益', marker_color=bar_colors, opacity=0.6))
+        fig_pnl.add_trace(go.Scatter(x=bt_results['決済日時'], y=bt_results['Cumulative_PL'], mode='lines+markers', name='累積損益', line=dict(color='yellow', width=3)))
+        
+        fig_pnl.update_layout(template="plotly_dark", height=400, margin=dict(l=0, r=0, t=30, b=20), xaxis=dict(title="決済日時", type='category'))
+        st.plotly_chart(fig_pnl, use_container_width=True)
+        st.dataframe(bt_results, hide_index=True, use_container_width=True)
+    else:
+        st.info(f"過去72時間以内に条件(確率{notify_threshold}%以上)を満たすエントリーポイントはありませんでした。")
+
+except Exception as e:
+    st.error(f"エラーが発生しました: {e}")
