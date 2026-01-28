@@ -51,6 +51,10 @@ st.markdown("""
         padding-left: 0.5rem;
         padding-right: 0.5rem;
     }
+    /* Plotlyの背景を強制的に黒にする */
+    .js-plotly-plot .plotly .main-svg {
+        background-color: #000000 !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -282,13 +286,11 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
 st.markdown("### **ドル円AI短期予測 (5分足専用・完全固定版)**")
 
 # === ★設定固定（5分足のみ） ===
-timeframe = "5分足 (5m)" # UIから削除し、変数固定
+timeframe = "5分足 (5m)"
 api_interval = "5m"
 api_period = "5d" 
 min_width_setting = 0.03
 trend_window = 100 
-
-# ターゲット設定も5分足用のみ
 future_configs = [(5, "5分後"), (15, "15分後"), (30, "30分後"), (60, "1H後")]
 past_configs = [(5, "5分前"), (15, "15分前"), (30, "30分前"), (60, "1H前")]
 
@@ -451,9 +453,20 @@ try:
         probs_down.append(100.0 - p_up)
         labels.append(label_text)
 
+    # --- ★修正点1: 棒グラフの数値表示（大きく白く） ---
     fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96'))
-    fig_bar.add_trace(go.Bar(x=labels, y=probs_down, name='下落確率', marker_color='#ff4b4b'))
+    fig_bar.add_trace(go.Bar(
+        x=labels, y=probs_up, name='上昇確率', marker_color='#00cc96',
+        text=[f"{p:.1f}%" for p in probs_up],
+        textposition='auto',
+        textfont=dict(size=18, color='white') # 大きい白い文字
+    ))
+    fig_bar.add_trace(go.Bar(
+        x=labels, y=probs_down, name='下落確率', marker_color='#ff4b4b',
+        text=[f"{p:.1f}%" for p in probs_down],
+        textposition='auto',
+        textfont=dict(size=18, color='white') # 大きい白い文字
+    ))
     fig_bar.update_layout(template="plotly_dark", height=250, margin=dict(l=0, r=0, t=30, b=20), barmode='group')
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -469,6 +482,22 @@ try:
     # --- チャート表示 ---
     st.markdown("#### **推移・AI軌道**")
     fig_chart = go.Figure()
+    
+    # --- ★修正点2: ボリンジャーバンド復活 ---
+    # 上部バンド（透明な線）
+    fig_chart.add_trace(go.Scatter(
+        x=df_fixed['ds'], y=df_fixed['BB_Upper'],
+        mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False
+    ))
+    # 下部バンド（上部との間を塗りつぶす）
+    fig_chart.add_trace(go.Scatter(
+        x=df_fixed['ds'], y=df_fixed['BB_Lower'],
+        mode='lines', line=dict(width=0),
+        fill='tonexty', fillcolor='rgba(138, 43, 226, 0.2)', # 薄い紫
+        name='BB(±2σ)', hoverinfo='skip'
+    ))
+
+    # チャートも固定データ(df_fixed)を表示
     fig_chart.add_trace(go.Candlestick(
         x=df_fixed['ds'], 
         open=df_fixed['Open'], high=df_fixed['High'], low=df_fixed['Low'], close=df_fixed['Close'], 
@@ -480,7 +509,15 @@ try:
     x_max = forecast['ds'].max()
     x_min = df_fixed['ds'].min()
     
-    fig_chart.update_layout(template="plotly_dark", height=500, xaxis=dict(range=[x_min, x_max]), yaxis=dict(fixedrange=False))
+    # --- ★修正点2: 背景を完全に黒にする ---
+    fig_chart.update_layout(
+        template="plotly_dark",
+        height=500,
+        plot_bgcolor='#000000', # プロットエリア背景黒
+        paper_bgcolor='#000000', # 外側背景黒
+        xaxis=dict(range=[x_min, x_max]),
+        yaxis=dict(fixedrange=False)
+    )
     st.plotly_chart(fig_chart, use_container_width=True)
 
     # --- バックテスト結果表示 ---
@@ -519,7 +556,15 @@ try:
         fig_pnl.add_trace(go.Bar(x=bt_results['決済日時'], y=bt_results['P/L(pips)'], name='単独損益', marker_color=bar_colors, opacity=0.6))
         fig_pnl.add_trace(go.Scatter(x=bt_results['決済日時'], y=bt_results['Cumulative_PL'], mode='lines+markers', name='累積損益', line=dict(color='yellow', width=3)))
         
-        fig_pnl.update_layout(template="plotly_dark", height=400, margin=dict(l=0, r=0, t=30, b=20), xaxis=dict(title="決済日時", type='category'))
+        # 背景黒
+        fig_pnl.update_layout(
+            template="plotly_dark",
+            height=400,
+            margin=dict(l=0, r=0, t=30, b=20),
+            plot_bgcolor='#000000',
+            paper_bgcolor='#000000',
+            xaxis=dict(title="決済日時", type='category')
+        )
         st.plotly_chart(fig_pnl, use_container_width=True)
         st.dataframe(bt_results, hide_index=True, use_container_width=True)
     else:
