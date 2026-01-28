@@ -87,9 +87,8 @@ def to_float(x):
 def get_realtime_data():
     try:
         ticker = yf.Ticker("USDJPY=X")
-        # 直近5日間の1分足を取得
-        df_now = ticker.history(period="5d", interval="1m")
-        
+        # 直近のデータを取得して現在値を確認
+        df_now = ticker.history(period="1d", interval="1m")
         if not df_now.empty:
             df_now.index = df_now.index.tz_convert('Asia/Tokyo')
             latest_price = float(df_now['Close'].iloc[-1])
@@ -168,13 +167,13 @@ def calculate_reversion_probability(current_price, predicted_price, lower_bound,
     
     return final_prob, note
 
-# --- バックテスト機能 (時間フィルター付き・72時間版・データ固定) ---
+# --- バックテスト機能 ---
 def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_window, threshold):
     """
     過去72時間分のデータでテスト。
-    重要: df_fixedは「確定した足のみ」のデータフレームであること。
     """
-    df_merged = pd.merge(df_fixed, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], left_on=df_fixed.columns[0], right_on='ds', how='inner')
+    # df_fixedとforecastをマージ
+    df_merged = pd.merge(df_fixed, forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], on='ds', how='inner')
     
     cutoff_date = df_merged['ds'].max() - timedelta(hours=72)
     backtest_data = df_merged[df_merged['ds'] >= cutoff_date].copy().reset_index(drop=True)
@@ -187,6 +186,7 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
         current_time = row['ds']
         current_hour = current_time.hour 
         
+        # エラー修正: 確実に存在するカラム名を使用
         o_price = to_float(row['Open'])
         h_price = to_float(row['High'])
         l_price = to_float(row['Low'])
@@ -237,6 +237,7 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
 
             pred = to_float(row['yhat'])
             
+            # Trend_SMAがあるか確認
             current_trend_sma = to_float(row['Trend_SMA']) if 'Trend_SMA' in row else c_price
             trend_dir = 0
             if c_price > current_trend_sma: trend_dir = 1
@@ -282,7 +283,7 @@ def perform_backtest_persistent(df_fixed, forecast_df, min_width_setting, trend_
 # --- メイン処理 ---
 st.markdown("### **ドル円AI短期予測 (5分足専用・完全固定版)**")
 
-# === 固定設定 ===
+# === 設定 ===
 timeframe = "5分足 (5m)"
 api_interval = "5m"
 api_period = "5d" 
@@ -310,39 +311,43 @@ try:
         st.error("データが取得できませんでした。時間をおいて再接続してください。")
         st.stop()
 
-    # --- データ整形 ---
+    # --- データ整形とカラム名統一 ---
     df = df.reset_index()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     
-    cols = {c.lower(): c for c in df.columns}
-    date_c = next((c for k, c in cols.items() if 'date' in k or 'time' in k), df.columns[0])
-    close_c = next((c for k, c in cols.items() if 'close' in k), df.columns[1])
-
+    # カラム名を統一 (Open, High, Low, Close, ds)
+    cols_map = {}
+    for c in df.columns:
+        cl = c.lower()
+        if 'date' in cl or 'time' in cl: cols_map[c] = 'ds'
+        elif 'open' in cl: cols_map[c] = 'Open'
+        elif 'high' in cl: cols_map[c] = 'High'
+        elif 'low' in cl: cols_map[c] = 'Low'
+        elif 'close' in cl: cols_map[c] = 'Close'
+    
+    df = df.rename(columns=cols_map)
+    
+    # タイムゾーン処理
     try:
-        df[date_c] = pd.to_datetime(df[date_c]).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
+        df['ds'] = pd.to_datetime(df['ds']).dt.tz_convert('Asia/Tokyo').dt.tz_localize(None)
     except:
-        df[date_c] = pd.to_datetime(df[date_c])
+        df['ds'] = pd.to_datetime(df['ds'])
 
     # テクニカル計算
-    df['SMA20'] = df[close_c].rolling(window=20).mean()
-    df['STD'] = df[close_c].rolling(window=20).std()
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    df['STD'] = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA20'] + (df['STD'] * 2)
     df['BB_Lower'] = df['SMA20'] - (df['STD'] * 2)
-    df['Trend_SMA'] = df[close_c].rolling(window=trend_window).mean()
+    df['Trend_SMA'] = df['Close'].rolling(window=trend_window).mean()
 
-    # Prophet用データ
-    df_p = pd.DataFrame()
-    df_p['ds'] = df[date_c]
-    df_p['y'] = df[close_c]
-    
     # --- ★【重要】データ固定化 ---
-    # バックテストとAI学習には「確定した足（最後の1行を除く）」だけを使う
-    # これにより、リロードしても結果が変わらなくなる
-    df_fixed = df_p.iloc[:-1].copy()
+    # Prophet学習用データ (OHLCすべて保持する)
+    df_p = df.copy()
+    df_p = df_p.rename(columns={'Close': 'y'}) # Prophetはターゲットをyとする
     
-    # テクニカル指標も固定データに対応させる
-    df_tech_fixed = df.iloc[:-1].copy()
+    # 最後の行（現在進行中の足）を除外して「固定データ」を作る
+    df_fixed = df_p.iloc[:-1].copy()
 
     # --- Prophet学習 (固定データ使用) ---
     m = Prophet(
@@ -369,12 +374,12 @@ try:
         current_price = realtime_price
         display_time = realtime_time.strftime('%m/%d %H:%M')
     else:
-        current_price = to_float(df_p['y'].iloc[-1]) # df_pの最後(現在進行中または直近)
+        current_price = to_float(df_p['y'].iloc[-1]) 
         now_jst_fallback = datetime.now(pytz.timezone('Asia/Tokyo'))
         display_time = now_jst_fallback.strftime('%m/%d %H:%M')
 
     # トレンド判定 (確定足ベース)
-    current_trend_sma = to_float(df_tech_fixed['Trend_SMA'].iloc[-1])
+    current_trend_sma = to_float(df_fixed['Trend_SMA'].iloc[-1])
     trend_dir = 0
     if not pd.isna(current_trend_sma):
         if last_fixed_price > current_trend_sma: trend_dir = 1 
@@ -446,7 +451,7 @@ try:
         r = forecast.iloc[(forecast['ds'] - t_time).abs().argsort()[:1]].iloc[0]
         p = to_float(r['yhat'])
         
-        # 判定には「現在のリアルタイム価格」を使う（ここは動いてOK）
+        # 判定には「現在のリアルタイム価格」を使う
         p_up, note = calculate_reversion_probability(
             current_price, p, 
             to_float(r['yhat_lower']), to_float(r['yhat_upper']), 
@@ -464,7 +469,6 @@ try:
 
     # 詳細数値
     st.markdown("#### **詳細数値 & AI判断**")
-    # 詳細のメモは一番近い未来（5分後）のものを使う
     detail_data = {
         "時間": labels,
         "上昇確率": [f"{p:.1f} %" for p in probs_up],
@@ -475,13 +479,13 @@ try:
     # --- チャート表示 ---
     st.markdown("#### **推移・AI軌道**")
     fig_chart = go.Figure()
-    # チャートも固定データ(df_fixed)を表示して安定させる
+    # チャートも固定データ(df_fixed)を表示
     fig_chart.add_trace(go.Candlestick(
         x=df_fixed['ds'], 
-        open=df_tech_fixed['Open'], high=df_tech_fixed['High'], low=df_tech_fixed['Low'], close=df_tech_fixed['Close'], 
+        open=df_fixed['Open'], high=df_fixed['High'], low=df_fixed['Low'], close=df_fixed['y'], 
         name='実測(確定足)'
     ))
-    fig_chart.add_trace(go.Scatter(x=df_fixed['ds'], y=df_tech_fixed['SMA20'], mode='lines', name='SMA20', line=dict(color='cyan', width=1)))
+    fig_chart.add_trace(go.Scatter(x=df_fixed['ds'], y=df_fixed['SMA20'], mode='lines', name='SMA20', line=dict(color='cyan', width=1)))
     fig_chart.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='AI軌道', line=dict(color='yellow', width=2)))
     
     x_max = forecast['ds'].max()
@@ -503,7 +507,7 @@ try:
     </div>
     """, unsafe_allow_html=True)
     
-    # 固定されたデータ(df_fixed)を使ってバックテストを実行
+    # 固定データ(df_fixed)を渡す
     bt_results = perform_backtest_persistent(df_fixed, forecast, min_width_setting, trend_window, entry_threshold)
     
     if not bt_results.empty:
